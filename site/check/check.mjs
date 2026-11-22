@@ -449,7 +449,10 @@ async function copy(button, text, done) {
 }
 
 $("copy-link").onclick = (e) => copy(e.currentTarget, location.href, "Link copied");
-$("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), state.pythons, state.platforms, location.href), "Result copied");
+// The line names only what the shown result counted: its own targets, less the Pythons the lockfile leaves out,
+// never the current selection (a new check may still be running for it).
+const counted = (key) => [...new Set(state.result.targets.filter((t) => !state.result.outside_lock.includes(t.python)).map((t) => t[key]))];
+$("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), counted("python"), counted("platform"), location.href), "Result copied");
 $("copy-prompt").onclick = (e) => copy(e.currentTarget, fixPrompt(`${state.repo.owner}/${state.repo.name}`, state.result, state.fixes, state.pythons, state.platforms, state.gapWheels), "Prompt copied");
 $("copy-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
 $("copy-verdict-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");

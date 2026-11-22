@@ -365,4 +365,21 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   // Both new copy buttons use copy() like the existing ones.
   assert.match(source, /\$\("copy-verdict-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.match(source, /\$\("copy-share"\)\.onclick = \(e\) => copy\(e\.currentTarget, shareText\(/);
+  // The share line names only the shown result's counted targets: never a Python the lockfile leaves out, and never
+  // a selection whose check hasn't come back yet.
+  const countedSrc = source.match(/^const counted = (.*);$/m);
+  assert.ok(countedSrc, "counted() is in check.mjs");
+  const counted = new Function("state", `return ${countedSrc[1]};`)({
+    result: {
+      outside_lock: ["3.15"],
+      targets: [
+        { python: "3.14", platform: "linux-x86_64" }, { python: "3.14", platform: "win-amd64" },
+        { python: "3.15", platform: "linux-x86_64" }, { python: "3.15", platform: "win-amd64" },
+      ],
+    },
+  });
+  assert.deepEqual(counted("python"), ["3.14"]);
+  assert.deepEqual(counted("platform"), ["linux-x86_64", "win-amd64"]);
+  assert.match(source, /shareText\([^\n]*counted\("python"\), counted\("platform"\)/);
+  assert.doesNotMatch(source, /shareText\([^\n]*state\.pythons/);
 });
