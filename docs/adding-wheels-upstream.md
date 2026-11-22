@@ -46,6 +46,14 @@ The [free-threaded Python 3.14 campaign](https://wheelgap.github.io/tracker/camp
 - **What the tracker already knows.** For some packages the build lab builds the sdist on 3.14t and records whether importing the result kept the GIL off or turned it back on. The package’s page shows that under its 3.14t `source` cells; link it in the issue if it is there.
 - **Checking a release:** `uvx wheelgap <name>==<version> -p 3.14t -t linux-x86_64`.
 
+### Python 3.15 on Windows (cp315-win_amd64)
+
+The [Python 3.15 on Windows x64 campaign](https://wheelgap.github.io/tracker/campaigns/py315-windows/) lists the most-downloaded packages that ship a `win_amd64` wheel for Python 3.14 but none for 3.15. The specifics:
+
+- **cibuildwheel config.** Upgrade `pypa/cibuildwheel` to a release that includes CPython 3.15, and make sure `CIBW_BUILD` / `CIBW_SKIP` doesn't exclude `cp315-*` or cap the Python version at 3.14. While 3.15 is in pre-release, opt in with [`CIBW_ENABLE: cpython-prerelease`](https://cibuildwheel.pypa.io/en/stable/options/#enable) (or `enable = ["cpython-prerelease"]` in `pyproject.toml`) to build and test `cp315-win_amd64` before the final release ([PEP 790](https://peps.python.org/pep-0790/)).
+- **Testing before 3.15 is final.** In GitHub Actions, `actions/setup-python` accepts `python-version: "3.15"` with `allow-prereleases: true` on `windows-latest`, and `CIBW_TEST_COMMAND` runs the test suite against the built `cp315-win_amd64` wheel.
+- **Checking a release:** `uvx wheelgap <name>==<version> -p 3.15 -t win-amd64`.
+
 Keep the change to the workflow and the project’s existing test suite. Don’t add a new backend or rewrite the package’s build unless the maintainers ask for that.
 
 ## 3. Pure-Python packages that only ship an sdist
