@@ -311,27 +311,30 @@ export function verdictText(h) {
   return `${h.gaps} of ${h.packages} packages ${h.gaps === 1 ? "has" : "have"} no wheel for ${some}`;
 }
 
-// One-line plain-text summary of a result, ending with the share link. Built as text, never as HTML.
-export function shareText(repoName, h, pythons, platforms, url) {
+// One-line plain-text summary of a result, ending with the share link. Built as text, never as HTML. The line is
+// pasted where the page's alerts don't follow it, so `notChecked` (the packages left off pypi.org as a private
+// index's, which the counts leave out) is said in the line itself, and a result with any is never a ✓.
+export function shareText(repoName, h, pythons, platforms, url, notChecked = 0) {
+  const tail = `${notChecked ? `; ${notChecked} more ${notChecked === 1 ? "wasn't" : "weren't"} checked (their index isn't known to be PyPI)` : ""} (checked with wheelgap) ${url}`;
   if (h.packages === 0) {
     return `${repoName}: no dependencies were checked (checked with wheelgap) ${url}`;
   }
   if (h.targets === 0) {
-    return `${repoName}: lockfile leaves out every Python picked (checked with wheelgap) ${url}`;
+    return `${repoName}: lockfile leaves out every Python picked${tail}`;
   }
   if (h.gaps === 0 && h.unknown) {
     const where = h.targets === 1 ? "1 target" : "some targets";
-    return `${repoName}: no dependency is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${where} (checked with wheelgap) ${url}`;
+    return `${repoName}: no dependency is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${where}${tail}`;
   }
   if (h.gaps === 0) {
     const deps = h.packages === 1 ? "1 dependency has" : `all ${h.packages} dependencies have`;
     const pyList = sortPythons(pythons).join(", ");
     const plats = platforms.length === 1 ? "1 platform" : `${platforms.length} platforms`;
-    return `✓ ${repoName}: ${deps} a wheel on Python ${pyList} for ${plats} (checked with wheelgap) ${url}`;
+    return `${notChecked ? "" : "✓ "}${repoName}: ${notChecked ? deps.replace(/ (has|have)$/, " checked $1") : deps} a wheel on Python ${pyList} for ${plats}${tail}`;
   }
   const verb = h.gaps === 1 ? "has" : "have";
   const where = h.targets === 1 ? "1 target" : `at least one of ${h.targets} targets`;
-  return `${repoName}: ${h.gaps} of ${h.packages} dependencies ${verb} no wheel on ${where} (checked with wheelgap) ${url}`;
+  return `${repoName}: ${h.gaps} of ${h.packages} dependencies ${verb} no wheel on ${where}${tail}`;
 }
 
 // "Ready for what's next?" shortcuts: the platforms and Pythons people most often move to, that aren't picked yet.

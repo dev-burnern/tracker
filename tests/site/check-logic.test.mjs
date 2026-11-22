@@ -257,6 +257,34 @@ test("shareText formats clean, gaps, unknowns, single target, and special charac
   assert.ok(!line.includes("&amp;") && !line.includes("&lt;"));
 });
 
+test("shareText never reads as fully clean when a private index's packages weren't checked", () => {
+  // The line is pasted without the page's alerts, so it says how many were left off pypi.org, and drops the ✓.
+  const url = "https://wheelgap.github.io/tracker/check/?repo=owner/name";
+  const clean = { gaps: 0, unknown: 0, packages: 12, targets: 2 };
+  const line = shareText("owner/name", clean, ["3.14"], ["linux-x86_64", "win-amd64"], url, 5);
+  assert.equal(
+    line,
+    `owner/name: all 12 dependencies checked have a wheel on Python 3.14 for 2 platforms; 5 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+  );
+  assert.ok(!line.includes("✓"));
+  assert.equal(
+    shareText("owner/name", { ...clean, packages: 1 }, ["3.14"], ["linux-x86_64"], url, 1),
+    `owner/name: 1 dependency checked has a wheel on Python 3.14 for 1 platform; 1 more wasn't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { ...clean, gaps: 2 }, ["3.14"], ["linux-x86_64"], url, 3),
+    `owner/name: 2 of 12 dependencies have no wheel on at least one of 2 targets; 3 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+  );
+  // Every package private: nothing was checked, and the line says only that.
+  assert.equal(
+    shareText("owner/name", { ...clean, packages: 0 }, ["3.14"], ["linux-x86_64"], url, 4),
+    `owner/name: no dependencies were checked (checked with wheelgap) ${url}`,
+  );
+  // No private packages: the line is unchanged, ✓ and all.
+  assert.equal(shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url, 0), shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url));
+  assert.match(shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url), /^✓ /);
+});
+
 test("next steps offer what isn't picked yet, as whole selections", () => {
   const steps = nextSteps(["3.14"], ["linux-x86_64"]);
   assert.deepEqual(steps.map((s) => s.label), ["Free-threaded 3.14t", "Windows on ARM", "Linux ARM64", "Alpine Linux", "Python 3.15", "Everything"]);

@@ -381,5 +381,6 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   assert.deepEqual(counted("python"), ["3.14"]);
   assert.deepEqual(counted("platform"), ["linux-x86_64", "win-amd64"]);
   assert.match(source, /shareText\([^\n]*counted\("python"\), counted\("platform"\)/);
+  assert.match(source, /shareText\([^\n]*location\.href, \(state\.result\.private \|\| \[\]\)\.length\)/);
   assert.doesNotMatch(source, /shareText\([^\n]*state\.pythons/);
 });
