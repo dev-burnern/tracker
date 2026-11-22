@@ -354,22 +354,34 @@ export function canonicalName(name) {
   return String(name).toLowerCase().replace(/[-_.]+/g, "-");
 }
 
+// GitHub's own hosts (github.com, gist/api.github.com, raw.githubusercontent.com): not "another host".
+function githubHost(host) {
+  return host === "github.com" || host.endsWith(".github.com") || host === "githubusercontent.com" || host.endsWith(".githubusercontent.com");
+}
+
+function hostHint(host) {
+  const h = host.toLowerCase().replace(/^www\./, "");
+  return !h || githubHost(h) ? null : { kind: "other-host", host: h };
+}
+
 // Classify an input parseRepo() rejected: a single PyPI package name, a URL on another host, or null.
 export function inputHint(text) {
   const s = String(text ?? "").trim();
   if (!s || /\s/.test(s)) return null;
-  const ssh = s.match(/^git@([A-Za-z0-9.-]+):/);
-  if (ssh) {
-    const host = ssh[1].toLowerCase().replace(/^www\./, "");
-    return host === "github.com" ? null : { kind: "other-host", host };
-  }
-  if (/^https?:\/\//i.test(s)) {
+  const ssh = s.match(/^(?:ssh:\/\/)?git@([A-Za-z0-9.-]+)[:/]/i);
+  if (ssh) return hostHint(ssh[1]);
+  // A URL with a scheme (https://, git+https://, ssh://), or one without where the first segment is a host.
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+  const first = s.split("/")[0];
+  if (withScheme || (s.includes("/") && /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(first) && /\.[A-Za-z]{2,}$/.test(first))) {
     try {
-      const host = new URL(s).hostname.toLowerCase().replace(/^www\./, "");
-      if (host && host !== "github.com") return { kind: "other-host", host };
-    } catch {}
-    return null;
+      return hostHint(new URL(withScheme ? s.replace(/^[a-z0-9.-]*\+/i, "") : `https://${s}`).hostname);
+    } catch {
+      return null;
+    }
   }
+  // A bare domain (gitlab.com, codeberg.org) is a host, not a package called gitlab-com.
+  if (/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.(com|org|net|io|dev)$/i.test(s)) return hostHint(s);
   if (!s.includes("/") && /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/.test(s)) {
     return { kind: "package", name: canonicalName(s) };
   }

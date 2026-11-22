@@ -76,7 +76,18 @@ test("inputHint identifies package names and non-GitHub hosts, and ignores every
   assert.deepEqual(inputHint("https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
   assert.deepEqual(inputHint("https://codeberg.org/owner/project"), { kind: "other-host", host: "codeberg.org" });
   assert.deepEqual(inputHint("git@gitlab.com:owner/project.git"), { kind: "other-host", host: "gitlab.com" });
-  for (const none of ["owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2"]) {
+  assert.deepEqual(inputHint("ssh://git@gitlab.com/owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("git+https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  // A bare domain is a host, not a package called gitlab-com.
+  assert.deepEqual(inputHint("gitlab.com"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("codeberg.org"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("zope.interface"), { kind: "package", name: "zope-interface" });
+  // GitHub's own hosts get the default message, not "GitHub repositories only".
+  for (const none of [
+    "owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2", "github.com", "www.github.com",
+    "https://raw.githubusercontent.com/o/r/main/uv.lock", "https://api.github.com/repos/o/r", "https://gist.github.com/u/1",
+  ]) {
     assert.equal(inputHint(none), null, none);
   }
 });

@@ -300,12 +300,16 @@ test("showInputError builds package and other-host hints as DOM nodes inside the
     classList: { toggle(name, on) { if (name === "error") statusEl.error = Boolean(on); } },
   };
   const el = (tag, attrs = {}, ...kids) => ({ tag, attrs, kids });
+  const state = { inputError: false };
   const showInputError = new Function(
-    "$", "el", "inputHint",
+    "$", "el", "inputHint", "state",
     `${st[0]}\n${hintFn[0]}\nreturn showInputError;`,
-  )(() => statusEl, el, checkLogic.inputHint);
+  )(() => statusEl, el, checkLogic.inputHint, state);
 
   // Package name: links to ../p/<canonical>/ and ../, with the typed name inserted as a plain text node.
+  showInputError("numpy");
+  assert.equal(state.inputError, true);
+  assert.deepEqual(statusEl.children[1], { tag: "a", attrs: { href: "../p/numpy/" }, kids: ["See its wheel coverage"] });
   showInputError("Pillow");
   assert.equal(statusEl.error, true);
   assert.equal(statusEl.children[0], "Pillow looks like a package, not a repository. ");
@@ -319,11 +323,18 @@ test("showInputError builds package and other-host hints as DOM nodes inside the
   assert.match(statusEl.children[0], /public GitHub repositories only/);
   assert.deepEqual(statusEl.children[1], { tag: "code", attrs: { text: "uvx wheelgap" }, kids: [] });
   assert.equal(statusEl.children[3].tag, "a");
-  assert.equal(statusEl.children[3].attrs.href, "https://github.com/wheelgap/wheelgap#readme");
+  assert.equal(statusEl.children[3].attrs.href, "https://github.com/wheelgap/wheelgap/blob/main/docs/getting-started.md");
 
   // Anything else: keeps the default message as textContent.
   showInputError("<script>");
   assert.equal(statusEl.error, true);
   assert.equal(statusEl.textContent, "That doesn't look like a GitHub repository. Try owner/name or a github.com URL.");
   assert.doesNotMatch(source, /innerHTML/);
+
+  // Wired to the form and to a bad ?repo=, and the worker's start-up lines don't overwrite the hint.
+  assert.match(source, /if \(!repo\) return showInputError\(text\);/);
+  assert.match(source, /if \(rawRepo\) \{\n\s+\$\("repo"\)\.value = rawRepo;\n\s+showInputError\(rawRepo\);/);
+  assert.match(source, /if \(data\.id === undefined \? !state\.inputError : data\.id === seq\) status\(/);
+  assert.match(source, /if \(!state\.repo && !state\.inputError\) status\(`Ready\./);
+  assert.match(source, /function start\(repo, query = null\) \{\n\s+state\.inputError = false;/);
 });

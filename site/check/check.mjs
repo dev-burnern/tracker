@@ -71,6 +71,7 @@ let wheelgapVersion = null;
 const state = {
   repo: null, ref: null, root: null, plan: null, detected: null, lockfile: null, auto: false, pythons: [], platforms: [],
   result: null, fixes: null, gapWheels: null, fixesDone: false, python: null, platform: null, showAll: false, truncated: false, lab: {},
+  inputError: false,
 };
 
 function status(content, error = false) {
@@ -79,7 +80,9 @@ function status(content, error = false) {
   $("status").classList.toggle("error", error);
 }
 
+// Shown until the next check starts: the worker's start-up progress and "Ready." lines mustn't replace it.
 function showInputError(raw) {
+  state.inputError = true;
   const hint = inputHint(raw);
   if (hint?.kind === "package") {
     status([
@@ -96,7 +99,7 @@ function showInputError(raw) {
       "This page reads public GitHub repositories only. For a GitLab or other checkout, run ",
       el("code", { text: "uvx wheelgap" }),
       " in it (",
-      el("a", { href: "https://github.com/wheelgap/wheelgap#readme", rel: "noopener" }, "getting started"),
+      el("a", { href: "https://github.com/wheelgap/wheelgap/blob/main/docs/getting-started.md", rel: "noopener" }, "getting started"),
       ").",
     ], true);
     return;
@@ -123,12 +126,12 @@ worker.onmessageerror = () => workerFailed("The checker sent something the page 
 
 worker.onmessage = ({ data }) => {
   if (data.type === "progress") {
-    if (data.id === undefined || data.id === seq) status(STAGES[data.stage] || "Working…"); // not a dropped request's
+    if (data.id === undefined ? !state.inputError : data.id === seq) status(STAGES[data.stage] || "Working…"); // not a dropped request's
     return;
   }
   if (data.type === "ready") {
     wheelgapVersion = data.wheelgap;
-    if (!state.repo) status(`Ready. wheelgap ${data.wheelgap} is running in your browser.`);
+    if (!state.repo && !state.inputError) status(`Ready. wheelgap ${data.wheelgap} is running in your browser.`);
     return;
   }
   if (data.id !== undefined && data.id !== seq) return; // an answer to a request the page has moved on from
@@ -156,6 +159,7 @@ worker.onmessage = ({ data }) => {
 };
 
 function start(repo, query = null) {
+  state.inputError = false;
   state.repo = repo;
   state.query = query;
   state.result = null;
