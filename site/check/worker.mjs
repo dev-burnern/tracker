@@ -108,7 +108,8 @@ async function load(r, id, requestedFile = null) {
   const paths = (tree.tree || []).filter((e) => e.type === "blob").map((e) => e.path);
   const plan = JSON.parse(driver.plan(JSON.stringify(paths)));
   const wanted = requestedFile || r.file || null;
-  const fileInTree = Boolean(wanted && paths.includes(wanted));
+  // A truncated file list may leave the named file out: fetch it anyway, and a missing one fails by its own name.
+  const fileInTree = Boolean(wanted && (paths.includes(wanted) || tree.truncated));
   const root = `/repos/${id}`;
   const files = [...plan.workflows, ...plan.dockerfiles, ...(plan.python_version ? [plan.python_version] : [])];
   post({ id, type: "progress", stage: "files", count: files.length });

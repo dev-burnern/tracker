@@ -264,7 +264,7 @@ function renderVerdict() {
   $("verdict-detail").textContent = `${repoName} · ${r.lockfile}${state.ref && state.ref !== "HEAD" ? ` at ${state.ref}` : ""} · Python ${sortPythons(state.pythons).join(", ")} on ${state.platforms.length} platform${state.platforms.length === 1 ? "" : "s"}`;
   const alerts = [];
   if (state.fileNotice) {
-    alerts.push(el("p", { class: "alert warn", text: state.fileNotice }));
+    alerts.push(el("p", { class: "alert warn", text: `${state.fileNotice} Checked ${r.lockfile} instead.` }));
   }
   if (r.outside_lock.length) {
     alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} only allows Python ${r.requires_python}, so it has no wheels for ${r.outside_lock.join(", ")} and those aren't counted. Widening requires-python and re-locking is the first step there.` }));

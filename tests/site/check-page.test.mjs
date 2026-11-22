@@ -325,7 +325,10 @@ test("a blob link checks the named file when readable, or announces the fallback
   assert.equal(reqs.state.lockfile, "requirements/default.txt");
   assert.equal(reqs.state.auto, false);
   assert.equal(reqs.state.fileNotice, null);
-  assert.equal(reqs.state.plan.lockfiles[0].path, "requirements/default.txt");
+  // Added after the repo's own files, so the badge's automatic pick (lockfiles[0]) is still pyproject.toml and
+  // the badge link keeps lock=requirements/default.txt.
+  assert.deepEqual(reqs.state.plan.lockfiles.map((l) => l.path), ["pyproject.toml", "requirements/default.txt"]);
+  assert.equal(checkLogic.pickLockfile(reqs.state.plan.lockfiles, null).path, "pyproject.toml");
 
   // Blob link to listed backend/uv.lock: checks backend/uv.lock, not root uv.lock.
   const nested = runOnLoaded({
@@ -347,5 +350,19 @@ test("a blob link checks the named file when readable, or announces the fallback
   assert.equal(readme.ran, 1);
   assert.equal(readme.state.lockfile, "uv.lock");
   assert.equal(readme.state.auto, true);
-  assert.equal(readme.state.fileNotice, "README.md isn't a file this page reads. Checked uv.lock instead.");
+  assert.equal(readme.state.fileNotice, "README.md isn't a file this page reads.");
+
+  // A uv.lock in a folder plan() skips (examples/) is still a file the page reads: it's checked, not refused.
+  const example = runOnLoaded({
+    repo: checkLogic.parseRepo("https://github.com/o/r/blob/main/examples/app/uv.lock"),
+    lockfiles: [{ path: "uv.lock", offline: true }],
+    fileInTree: true,
+  });
+  assert.equal(example.state.lockfile, "examples/app/uv.lock");
+  assert.equal(example.state.fileNotice, null);
+
+  // The verdict names the file it ended up checking, read at render time: after a tool-settings-only
+  // pyproject.toml gives way to requirements.txt, the notice must not still say pyproject.toml.
+  assert.match(source, /text: `\$\{state\.fileNotice\} Checked \$\{r\.lockfile\} instead\.`/);
+  assert.match(read("worker.mjs"), /paths\.includes\(wanted\) \|\| tree\.truncated/);
 });

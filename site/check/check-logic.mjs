@@ -97,15 +97,22 @@ export function pickLockfile(lockfiles, dir) {
   return lockfiles.find(inDir) ?? lockfiles[0] ?? null;
 }
 
-// Whether a file path not listed by plan() is one wheelgap reads as a requirements file (*.txt, *.in) or pyproject.toml.
+const LOCK_NAMES = ["uv.lock", "poetry.lock", "pdm.lock", "pylock.toml", "Pipfile.lock", "requirements.txt", "pixi.lock"];
+const OFFLINE_NAMES = ["uv.lock", "pylock.toml", "poetry.lock", "pdm.lock"];
+
+// Whether a file path not listed by plan() is one wheelgap reads by its name (as wheelgap's sources.file_kind does):
+// a lockfile (also in a folder plan() skips, or past its limit), a requirements file (*.txt, *.in) or pyproject.toml.
 export function isReadableFile(path) {
   const base = String(path ?? "").split("/").pop();
-  return /\.(txt|in)$/i.test(base) || base === "pyproject.toml";
+  return LOCK_NAMES.includes(base) || base === "pyproject.toml" || /\.(txt|in)$/i.test(base)
+    || (base.startsWith("pylock.") && base.endsWith(".toml")) || base.endsWith(".py.lock")
+    || (base.startsWith("requirements") && base.endsWith(".lock")) || (base.endsWith(".lock") && base.includes("uv"));
 }
 
 // Pick the file to check when a link or query may have named one explicitly.
-// Returns { lock, lockfiles, auto, notice } where `lockfiles` may have the named file added when it exists in the
-// repo tree and is readable, and `notice` explains when a named file couldn't be read and the page fell back.
+// Returns { lock, lockfiles, auto, notice }. `lockfiles` has the named file added at the end (so the repo's own
+// automatic pick stays first) when it exists in the repo tree and is readable. `notice` says why a named file
+// wasn't checked; the page adds which file it checked instead, since that can still change (withoutUnreadable).
 export function pickRequestedFile(lockfiles, requested, inTree, dir) {
   if (!requested) {
     return { lock: pickLockfile(lockfiles, dir), lockfiles, auto: true, notice: null };
@@ -115,15 +122,13 @@ export function pickRequestedFile(lockfiles, requested, inTree, dir) {
     return { lock: existing, lockfiles, auto: false, notice: null };
   }
   if (inTree && isReadableFile(requested)) {
-    const added = { path: requested, offline: false };
-    return { lock: added, lockfiles: [added, ...lockfiles], auto: false, notice: null };
+    const added = { path: requested, offline: OFFLINE_NAMES.includes(requested.split("/").pop()) };
+    return { lock: added, lockfiles: [...lockfiles, added], auto: false, notice: null };
   }
-  const fallback = pickLockfile(lockfiles, dir);
-  const why = !isReadableFile(requested)
+  const notice = !isReadableFile(requested)
     ? `${requested} isn't a file this page reads.`
     : `${requested} wasn't found in this repository.`;
-  const notice = fallback ? `${why} Checked ${fallback.path} instead.` : why;
-  return { lock: fallback, lockfiles, auto: true, notice };
+  return { lock: pickLockfile(lockfiles, dir), lockfiles, auto: true, notice };
 }
 
 // After wheelgap couldn't read `failed`: the repo's other files to pick from instead, or null to report the error.

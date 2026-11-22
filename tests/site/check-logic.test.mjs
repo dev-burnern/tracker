@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, pickRequestedFile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, rawUrl, pickLockfile, pickRequestedFile, isReadableFile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -75,6 +75,27 @@ test("parseRepo refuses what isn't a repo", () => {
   for (const bad of ["", "fastapi", "https://gitlab.com/a", "a b/c", "../x", "o/..", "o/r/tree/main/../../etc", "javascript:alert(1)", "o/r/tree/ma in/x"]) {
     assert.equal(parseRepo(bad), null, bad);
   }
+});
+
+test("pickRequestedFile checks a named file, adds a readable one from the tree, or says why it fell back", () => {
+  const locks = [{ path: "pyproject.toml", offline: false }, { path: "uv.lock", offline: true }];
+  assert.deepEqual(pickRequestedFile(locks, null, false, null), { lock: locks[0], lockfiles: locks, auto: true, notice: null });
+  assert.deepEqual(pickRequestedFile(locks, "uv.lock", true, null), { lock: locks[1], lockfiles: locks, auto: false, notice: null });
+  const added = pickRequestedFile(locks, "requirements/default.txt", true, null);
+  assert.deepEqual(added.lock, { path: "requirements/default.txt", offline: false });
+  assert.deepEqual(added.lockfiles.map((l) => l.path), ["pyproject.toml", "uv.lock", "requirements/default.txt"]);
+  assert.equal(added.auto, false);
+  assert.deepEqual(pickRequestedFile(locks, "tests/poetry.lock", true, null).lock, { path: "tests/poetry.lock", offline: true });
+  const missing = pickRequestedFile(locks, "requirements/gone.txt", false, null);
+  assert.equal(missing.lock, locks[0]);
+  assert.equal(missing.auto, true);
+  assert.equal(missing.notice, "requirements/gone.txt wasn't found in this repository.");
+  assert.equal(pickRequestedFile(locks, "setup.cfg", true, null).notice, "setup.cfg isn't a file this page reads.");
+  assert.deepEqual(pickRequestedFile([], "setup.cfg", true, null), { lock: null, lockfiles: [], auto: true, notice: "setup.cfg isn't a file this page reads." });
+  for (const yes of ["uv.lock", "a/Pipfile.lock", "pixi.lock", "pylock.dev.toml", "script.py.lock", "requirements-dev.lock", "x/reqs.in", "pyproject.toml"]) {
+    assert.equal(isReadableFile(yes), true, yes);
+  }
+  for (const no of ["setup.cfg", "README.md", "setup.py", "Cargo.lock"]) assert.equal(isReadableFile(no), false, no);
 });
 
 test("rawUrl encodes each path segment", () => {
