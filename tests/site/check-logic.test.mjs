@@ -609,29 +609,30 @@ test("the page says why a file's packages were kept off pypi.org, naming the set
   // One that couldn't be fetched (or is named in another case), or a file list GitHub cut short: what they say about an index isn't known.
   assert.equal(
     privateText({ ...names, configs_unread: ["pyproject.toml"] }),
-    `Not checked: pyproject.toml (beside app/requirements.txt or in a folder above it) couldn't be read here. Such a file can point installers at an index other than PyPI (a [tool.uv] index, say), ${after} Check again to retry, or run uvx wheelgap app/requirements.txt in a checkout.`,
+    `Not checked: pyproject.toml (beside app/requirements.txt or in a folder above it) couldn't be read here. Such a file can point installers at an index other than PyPI (a [tool.uv] index, say), ${after} Check again to retry, or in a checkout run uvx wheelgap --index-url with your project's index and app/requirements.txt: without --index-url it would look these names up on PyPI.`,
   );
   assert.equal(
     privateText({ ...names, configs_unknown: true }),
-    `Not checked: GitHub listed only part of this repo's files, so a uv.toml, pyproject.toml or pdm.toml beside app/requirements.txt or in a folder above it may be missing from the list. Such a file can point installers at an index other than PyPI (a [tool.uv] index, say), ${after} uvx wheelgap app/requirements.txt in a checkout reads them all.`,
+    `Not checked: GitHub listed only part of this repo's files, so a uv.toml, pyproject.toml or pdm.toml beside app/requirements.txt or in a folder above it may be missing from the list. Such a file can point installers at an index other than PyPI (a [tool.uv] index, say), ${after} In a checkout, run uvx wheelgap --index-url with your project's index and app/requirements.txt: it reads them all, and without --index-url it would look these names up on PyPI.`,
   );
   const many = privateText({ ...base, private: Array.from({ length: 10 }, (_, i) => `p${i}`), configs_unread: ["a/pdm.toml", "a/uv.toml", "pdm.toml", "uv.toml"] });
   assert.match(many, /^Not checked: a\/pdm\.toml, a\/uv\.toml, pdm\.toml, and 1 more \(beside/);
   assert.match(many, /p0, p1, p2, p3, p4, p5, p6, p7, and 2 more\./);
 });
 
-test("privateText's index advice follows the reader: the CLI checks a requirements file's or pyproject's on PyPI", () => {
-  // driver.check's `reader`. --index-url alone isn't the same install as an --extra-index-url; a Pipfile.lock's or
-  // pixi.lock's pinned index is skipped by the CLI too, so --index-url stays the advice there.
+test("privateText never advises a command that would look the withheld names up on PyPI", () => {
+  // wheelgap 0.13.0's CLI looks a requirements file's or pyproject.toml's packages up on PyPI unless --index-url names
+  // another index, whatever the file says; so every branch's command carries --index-url, and says why.
   const base = { lockfile: "requirements.txt", private: ["corp-pkg"], configs: [], configs_unread: [], configs_unknown: false };
-  for (const reader of ["requirements", "pyproject"]) {
-    assert.match(privateText({ ...base, reader }), /corp-pkg\. uvx wheelgap requirements\.txt in a checkout checks them on PyPI's files\.$/);
+  for (const reader of ["requirements", "pyproject", "pipfile", "pixi", undefined]) {
+    const text = privateText({ ...base, reader });
+    assert.match(text, /corp-pkg\. To check them on that index, run uvx wheelgap --index-url with its URL in a checkout\.$/, String(reader));
+    assert.doesNotMatch(text, /checks them on PyPI's files/);
   }
-  for (const reader of ["pipfile", "pixi", undefined]) {
-    assert.match(privateText({ ...base, reader }), /To check them on that index, run uvx wheelgap --index-url with its URL in a checkout\.$/);
+  for (const extra of [{ configs_unknown: true }, { configs_unread: ["pyproject.toml"] }]) {
+    const text = privateText({ ...base, ...extra });
+    assert.match(text, /uvx wheelgap --index-url with your project's index and requirements\.txt: .*without --index-url it would look these names up on PyPI\.$/);
   }
-  // Unread or unknown settings files keep their own advice.
-  assert.match(privateText({ ...base, reader: "requirements", configs_unknown: true }), /uvx wheelgap requirements\.txt in a checkout reads them all\.$/);
 });
 
 test("refs with '..' or empty segments are refused", () => {

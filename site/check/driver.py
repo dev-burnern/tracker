@@ -329,10 +329,20 @@ def _public_extra_hosts(root: str, path: str, configs_json: str | None) -> list[
         return []
     file = Path(root) / path
     found: list[str] = []
+    seen: dict[bool, set[Path]] = {False: set(), True: set()}
     try:
         if sources._nearby_config_names_an_index(file):
             return []
-        sources._read_requirements(file, {False: set(), True: set()}, [], index_options=found)
+        sources._read_requirements(file, seen, [], index_options=found)
+        # pip shlex-splits an option line and expands ${VAR} in it, where wheelgap's collector splits on whitespace:
+        # -'i' URL, --"index-url" URL, --ext\ra-index-url URL, --no-ind''ex or -${OPT} URL is an index option to pip
+        # (checked with pip 25.3) that the collector misses. Any option line in the file or its includes with a
+        # quote, a backslash or a $ isn't certain, so the file stays private.
+        for read in seen[False] | seen[True]:
+            for raw in sources._join_continued_lines(read.read_text(encoding="utf-8-sig")):
+                line = sources._COMMENT_RE.split(raw, 1)[0].strip()
+                if line.startswith("-") and any(c in line for c in "'\"\\$"):
+                    return []
     except Exception:  # noqa: BLE001 - anything wheelgap can't read is never certain
         return []
     hosts = set()

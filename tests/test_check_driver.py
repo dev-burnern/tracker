@@ -552,6 +552,39 @@ def test_any_index_option_but_a_whole_pytorch_line_keeps_the_file_private(tmp_pa
     assert "purewheel" in r["private"] and r["extra_indexes"] == []
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # pip 25.3 shlex-splits an option line and expands ${VAR}: each of these is an index option to it (checked with
+        # its own requirements parser; ${OPT} with OPT=i), though wheelgap's collector, splitting on whitespace, misses it.
+        "-'i' https://corp.example/simple",
+        '--"index-url" https://corp.example/simple',
+        "--ext\\ra-index-url https://corp.example/simple",
+        "--no-ind''ex",
+        "-${OPT} https://corp.example/simple",
+    ],
+)
+def test_an_option_line_pip_reads_differently_keeps_an_extra_index_file_private(tmp_path, line):
+    (tmp_path / "requirements.txt").write_text(TORCH_LINE + line + "\npurewheel==3.1\n", encoding="utf-8")
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == []
+    r = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), "{}", NO_CONFIGS))
+    assert "error" not in r, r
+    assert r["private"] == ["purewheel"] and r["extra_indexes"] == []
+    # The same in an include (-r, and -c) the file names.
+    (tmp_path / "inc.txt").write_text(line + "\n", encoding="utf-8")
+    for include in ("-r inc.txt", "-c inc.txt"):
+        (tmp_path / "requirements.txt").write_text(TORCH_LINE + include + "\npurewheel==3.1\n", encoding="utf-8")
+        assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == [], include
+
+
+def test_quotes_outside_option_lines_dont_stop_an_extra_index_file(tmp_path):
+    # A marker's quotes are on a requirement line, which pip never reads an index option from.
+    (tmp_path / "requirements.txt").write_text(
+        TORCH_LINE + 'purewheel==3.1; python_version >= "3.13"  # pinned "for now"\n', encoding="utf-8"
+    )
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["total"] == 1
+
+
 def test_a_byte_order_mark_doesnt_hide_a_first_line_index(tmp_path):
     # wheelgap reads requirements files as utf-8-sig, as pip decodes them; read as plain utf-8, the first line would
     # start with U+FEFF and not read as an option at all.

@@ -1173,14 +1173,15 @@ test("renderVerdict alerts on public extra indexes and avoids --index-url advice
   assert.ok(named.includes("requirements.txt also installs from download.pytorch.org (--extra-index-url). This page checked PyPI only. torch may be installed from there instead, so it's shown as unknown."), named.join("\n"));
 
   const privAlerts = run({ private: ["corp-pkg"], skipped: ["corp-pkg"], reader: "requirements" });
-  assert.ok(privAlerts.some((t) => t.includes("uvx wheelgap requirements.txt in a checkout checks them on PyPI's files")));
-  assert.ok(privAlerts.every((t) => !t.includes("run uvx wheelgap --index-url")));
+  // Never a plain command: the CLI would look these names up on PyPI without --index-url.
+  assert.ok(privAlerts.some((t) => t.includes("run uvx wheelgap --index-url with its URL in a checkout")));
+  assert.ok(privAlerts.every((t) => !t.includes("checks them on PyPI's files")));
   // A Pipfile.lock that pins a package to its own index: the CLI skips that one too, so --index-url is still the way.
   const pipfile = run({ lockfile: "Pipfile.lock", private: ["corp-pkg"], skipped: ["corp-pkg"], reader: "pipfile", looked_up: true });
   assert.ok(pipfile.some((t) => t.includes("run uvx wheelgap --index-url with its URL in a checkout")));
   // A settings file that couldn't be read keeps its own reason and advice, whatever the reader (#235).
   const unread = run({ private: ["corp-pkg"], skipped: ["corp-pkg"], reader: "requirements", configs: [], configs_unread: ["pyproject.toml"], configs_unknown: false });
-  assert.ok(unread.some((t) => t.includes("pyproject.toml (beside requirements.txt or in a folder above it) couldn't be read here") && t.endsWith("Check again to retry, or run uvx wheelgap requirements.txt in a checkout.")));
+  assert.ok(unread.some((t) => t.includes("pyproject.toml (beside requirements.txt or in a folder above it) couldn't be read here") && t.endsWith("Check again to retry, or in a checkout run uvx wheelgap --index-url with your project's index and requirements.txt: without --index-url it would look these names up on PyPI.")));
   assert.ok(unread.every((t) => !t.includes("checks them on PyPI's files")));
 });
 
