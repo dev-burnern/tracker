@@ -98,7 +98,7 @@ function forget(py, root) {
   py.pyimport("shutil").rmtree.callKwargs(root, { ignore_errors: true });
 }
 
-async function load(r, id) {
+async function load(r, id, requestedFile = null) {
   const { py, driver } = await ready;
   const ref = r.ref || "HEAD";
   post({ id, type: "progress", stage: "tree" });
@@ -107,6 +107,9 @@ async function load(r, id) {
   );
   const paths = (tree.tree || []).filter((e) => e.type === "blob").map((e) => e.path);
   const plan = JSON.parse(driver.plan(JSON.stringify(paths)));
+  const wanted = requestedFile || r.file || null;
+  // A truncated file list may leave the named file out: fetch it anyway, and a missing one fails by its own name.
+  const fileInTree = Boolean(wanted && (paths.includes(wanted) || tree.truncated));
   const root = `/repos/${id}`;
   const files = [...plan.workflows, ...plan.dockerfiles, ...(plan.python_version ? [plan.python_version] : [])];
   post({ id, type: "progress", stage: "files", count: files.length });
@@ -127,7 +130,7 @@ async function load(r, id) {
   }
   for (const old of [...loaded.keys()]) forget(py, old);
   loaded.set(root, { ...r, ref, root, fetched: new Set() });
-  return { plan, detected, truncated: Boolean(tree.truncated), ref, root };
+  return { plan, detected, truncated: Boolean(tree.truncated), ref, root, fileInTree };
 }
 
 // A pyproject.toml is fetched when it's the file to check. wheelgap also reads one beside a lockfile or a
@@ -278,7 +281,7 @@ self.onmessage = async ({ data }) => {
     if (type === "load") {
       latestLoad = id;
       latestCheck = null;
-      post({ id, type: "loaded", ...(await load(data.repo, id)) });
+      post({ id, type: "loaded", ...(await load(data.repo, id, data.file || null)) });
     } else if (type === "check") {
       latestCheck = id;
       const result = await check(id, data.root, data.lockfile, data.options);

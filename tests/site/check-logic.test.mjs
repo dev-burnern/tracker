@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, autoPick, isSideFile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, inputHint, rawUrl, pickLockfile, autoPick, isSideFile, pickRequestedFile, isReadableFile, fileKind, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -52,20 +52,125 @@ test("trimming preserves malformed and missing shapes instead of inventing empty
 });
 
 test("parseRepo reads the forms people paste", () => {
-  const plain = { owner: "fastapi", name: "fastapi", ref: null, dir: null };
+  const plain = { owner: "fastapi", name: "fastapi", ref: null, dir: null, file: null };
   assert.deepEqual(parseRepo("fastapi/fastapi"), plain);
   assert.deepEqual(parseRepo("https://github.com/fastapi/fastapi"), plain);
   assert.deepEqual(parseRepo("github.com/fastapi/fastapi.git/"), plain);
   assert.deepEqual(parseRepo("git@github.com:fastapi/fastapi.git"), plain);
   assert.deepEqual(parseRepo("https://www.github.com/fastapi/fastapi?tab=readme#top"), plain);
-  assert.deepEqual(parseRepo("https://github.com/o/r/tree/dev/backend/api"), { owner: "o", name: "r", ref: "dev", dir: "backend/api" });
-  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"), { owner: "o", name: "r", ref: "main", dir: "backend" });
-  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/uv.lock"), { owner: "o", name: "r", ref: "main", dir: null });
+  assert.deepEqual(parseRepo("https://github.com/o/r/tree/dev/backend/api"), { owner: "o", name: "r", ref: "dev", dir: "backend/api", file: null });
+  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"), { owner: "o", name: "r", ref: "main", dir: "backend", file: "backend/uv.lock" });
+  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/uv.lock"), { owner: "o", name: "r", ref: "main", dir: null, file: "uv.lock" });
+  assert.deepEqual(
+    parseRepo("https://github.com/celery/celery/blob/main/requirements/default.txt"),
+    { owner: "celery", name: "celery", ref: "main", dir: "requirements", file: "requirements/default.txt" },
+  );
+  assert.deepEqual(
+    parseRepo("https://github.com/o/r/blob/main/my%20dir/my%20reqs.txt"),
+    { owner: "o", name: "r", ref: "main", dir: "my dir", file: "my dir/my reqs.txt" },
+  );
 });
 
 test("parseRepo refuses what isn't a repo", () => {
   for (const bad of ["", "fastapi", "https://gitlab.com/a", "a b/c", "../x", "o/..", "o/r/tree/main/../../etc", "javascript:alert(1)", "o/r/tree/ma in/x"]) {
     assert.equal(parseRepo(bad), null, bad);
+  }
+});
+
+test("pickRequestedFile checks a named file, adds a readable one from the tree, or says why it fell back", () => {
+  const locks = [{ path: "pyproject.toml", offline: false }, { path: "uv.lock", offline: true }];
+  assert.deepEqual(pickRequestedFile(locks, null, false, null), { lock: locks[0], lockfiles: locks, auto: true, notice: null, choose: null });
+  assert.deepEqual(pickRequestedFile(locks, "uv.lock", true, null), { lock: locks[1], lockfiles: locks, auto: false, notice: null, choose: null });
+  const added = pickRequestedFile(locks, "requirements/default.txt", true, null);
+  assert.deepEqual(added.lock, { path: "requirements/default.txt", offline: false, added: true });
+  assert.deepEqual(added.lockfiles.map((l) => l.path), ["pyproject.toml", "uv.lock", "requirements/default.txt"]);
+  assert.equal(added.auto, false);
+  assert.deepEqual(pickRequestedFile(locks, "tests/poetry.lock", true, null).lock, { path: "tests/poetry.lock", offline: true, added: true });
+  // The only checkable file being one the link named: the badge's default must still come from the repo's own list.
+  const only = pickRequestedFile([], "requirements/base.txt", true, null);
+  assert.equal(only.lock.path, "requirements/base.txt");
+  assert.equal(pickLockfile(only.lockfiles.filter((l) => !l.added), null), null);
+  assert.equal(isReadableFile("REQS.TXT"), false);
+  const missing = pickRequestedFile(locks, "requirements/gone.txt", false, null);
+  assert.equal(missing.lock, locks[0]);
+  assert.equal(missing.auto, true);
+  assert.equal(missing.notice, "requirements/gone.txt wasn't found in this repository.");
+  assert.equal(pickRequestedFile(locks, "setup.cfg", true, null).notice, "setup.cfg isn't a file this page reads.");
+  assert.deepEqual(pickRequestedFile([], "setup.cfg", true, null), { lock: null, lockfiles: [], auto: true, notice: "setup.cfg isn't a file this page reads.", choose: null });
+  for (const yes of ["uv.lock", "a/Pipfile.lock", "pixi.lock", "pylock.dev.toml", "uv-py312.lock", "requirements-dev.lock", "x/reqs.in", "pyproject.toml"]) {
+    assert.equal(isReadableFile(yes), true, yes);
+  }
+  // script.py.lock: the pinned wheelgap 0.13.0 doesn't read a script's lock ("don't know how to read"), so it's
+  // refused here with the fallback, never checked and reported as unreadable.
+  for (const no of ["setup.cfg", "README.md", "setup.py", "Cargo.lock", "script.py.lock", "report.json", "pipfile.lock"]) {
+    assert.equal(isReadableFile(no), false, no);
+  }
+  assert.equal(pickRequestedFile(locks, "scripts/tool.py.lock", true, null).notice, "scripts/tool.py.lock isn't a file this page reads.");
+});
+
+test("pickRequestedFile's own pick is autoPick()'s: several requirements files under other names are asked about", () => {
+  const other = (path) => ({ path, offline: false, other: true });
+  const several = [other("requirements/base.txt"), other("requirements/docs.txt")];
+  // No file named, and a named file the page can't check: no guess, the files to ask between, and the notice.
+  assert.deepEqual(pickRequestedFile(several, null, false, null), { lock: null, lockfiles: several, auto: true, notice: null, choose: several });
+  assert.deepEqual(pickRequestedFile(several, "README.md", true, null), { lock: null, lockfiles: several, auto: true, notice: "README.md isn't a file this page reads.", choose: several });
+  assert.deepEqual(pickRequestedFile([other("requirements-dev.txt")], null, false, null).choose, [other("requirements-dev.txt")]);
+  // A named one is checked, listed or added.
+  assert.equal(pickRequestedFile(several, "requirements/docs.txt", false, null).choose, null);
+  assert.equal(pickRequestedFile(several, "requirements/docs.txt", false, null).lock.path, "requirements/docs.txt");
+  const added = pickRequestedFile(several, "deps/prod.txt", true, null);
+  assert.deepEqual([added.lock.path, added.choose], ["deps/prod.txt", null]);
+});
+
+test("a named file is checked offline exactly when wheelgap reads it as a lockfile that lists its files", () => {
+  // As sources.file_kind in wheelgap 0.13.0, and driver.py's OFFLINE_KINDS: by the reader its name picks, not by an
+  // exact name, so a pylock.dev.toml or uv-py312.lock isn't read as a lookups file (its left-out Pythons would show
+  // false gaps), and a requirements-dev.lock is still looked up.
+  const kinds = {
+    "uv.lock": "uv", "a/pylock.toml": "pylock", "poetry.lock": "poetry", "pdm.lock": "pdm", "Pipfile.lock": "pipfile",
+    "pixi.lock": "pixi", "pyproject.toml": "pyproject", "pylock.dev.toml": "pylock", "uv-py312.lock": "uv",
+    "requirements-dev.lock": "requirements", "requirements.uv.lock": "requirements", "x/dev.txt": "requirements",
+    "reqs.in": "requirements", "script.py.lock": null, "REQS.TXT": null, "report.json": null,
+  };
+  for (const [path, kind] of Object.entries(kinds)) assert.equal(fileKind(path), kind, path);
+  const offline = (path) => pickRequestedFile([], path, true, null).lock.offline;
+  for (const path of ["pylock.dev.toml", "envs/uv-py312.lock", "tests/poetry.lock", "examples/pdm.lock"]) assert.equal(offline(path), true, path);
+  for (const path of ["requirements-dev.lock", "requirements.uv.lock", "a/Pipfile.lock", "b/pixi.lock", "c/pyproject.toml", "reqs.in"]) {
+    assert.equal(offline(path), false, path);
+  }
+});
+
+test("inputHint identifies package names and non-GitHub hosts, and ignores everything else", () => {
+  assert.deepEqual(inputHint("numpy"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("Pillow"), { kind: "package", name: "pillow" });
+  assert.deepEqual(inputHint("ruamel.yaml"), { kind: "package", name: "ruamel-yaml" });
+  assert.deepEqual(inputHint("https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("https://codeberg.org/owner/project"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("git@gitlab.com:owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("ssh://git@gitlab.com/owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("git+https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  // A bare domain is a host, not a package called gitlab-com.
+  assert.deepEqual(inputHint("gitlab.com"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("codeberg.org"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("zope.interface"), { kind: "package", name: "zope-interface" });
+  assert.deepEqual(inputHint("jaraco.net"), { kind: "package", name: "jaraco-net" });
+  assert.deepEqual(inputHint("https://pypi.org/project/NumPy/"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("pypi.org/project/ruamel.yaml/0.18.6/"), { kind: "package", name: "ruamel-yaml" });
+  // Every input that gets a hint is one parseRepo() rejects, or the page would check it as a GitHub repo instead.
+  for (const hinted of [
+    "numpy", "gitlab.com/owner/project", "codeberg.org/owner/project", "bitbucket.org/o/r", "gitlab.com/owner",
+    "https://gitlab.com/owner/project", "git@gitlab.com:owner/project.git", "pypi.org/project/numpy", "https://pypi.org/project/numpy/",
+  ]) {
+    assert.ok(inputHint(hinted), hinted);
+    assert.equal(parseRepo(hinted), null, hinted);
+  }
+  // GitHub's own hosts get the default message, not "GitHub repositories only".
+  for (const none of [
+    "owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2", "github.com", "www.github.com",
+    "https://raw.githubusercontent.com/o/r/main/uv.lock", "https://api.github.com/repos/o/r", "https://gist.github.com/u/1",
+  ]) {
+    assert.equal(inputHint(none), null, none);
   }
 });
 
@@ -154,14 +259,47 @@ test("a file with nothing to check is no answer; one whose packages were skipped
   assert.equal(unreadableReason({ kind: "needs-index", error: "poetry.lock needs the index" }), null);
 });
 
+test("an all-private pyproject gives way only when automatically picked and another file remains", () => {
+  const result = { lockfile: "pyproject.toml", looked_up: true, listed: 3, packages: 0,
+    private: ["fastapi", "mylib", "numpy"], private_count: 3, skipped: ["fastapi", "mylib", "numpy"] };
+  const reason = "its index or source settings don't identify which packages are from PyPI";
+  const locks = [{ path: result.lockfile }, { path: "backend/uv.lock" }];
+  assert.equal(unreadableReason(result), reason);
+  assert.deepEqual(withoutUnreadable(locks, result.lockfile, true), [locks[1]]);
+  assert.equal(withoutUnreadable(locks, result.lockfile, false), null);
+  assert.equal(withoutUnreadable([locks[0]], result.lockfile, true), null);
+  // Repeated names with different markers are separate entries, but the display names are deduplicated.
+  assert.equal(unreadableReason({ ...result, listed: 2, private_count: 2, private: ["numpy"] }), reason);
+  for (const change of [
+    { packages: 1, private_count: 2 }, // some packages were checked
+    { private_count: 2 }, // another package was skipped for a different reason, or excluded by markers
+    { listed: 2, private_count: 0, private: [] }, // all marker-excluded
+    { listed: 0, private_count: 0, looked_up: false }, // empty offline lock
+    { private_count: undefined }, // no exact count from an older driver
+    { error: "unreadable" },
+    { lockfile: "requirements.txt" },
+  ]) assert.equal(unreadableReason({ ...result, ...change }), null, JSON.stringify(change));
+});
+
 test("a result's query round-trips, and unknown values are dropped", () => {
   const state = { repo: { owner: "o", name: "r", ref: "dev" }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] };
   const q = toQuery(state);
   assert.equal(q, "repo=o/r&ref=dev&lock=backend/uv.lock&py=3.14,3.14t&t=linux-aarch64,win-arm64");
   const back = fromQuery(`?${q}`);
-  assert.deepEqual(back, { repo: { owner: "o", name: "r", ref: "dev", dir: null }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] });
+  assert.deepEqual(back, { repo: { owner: "o", name: "r", ref: "dev", dir: null, file: null }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] });
+  const reqQuery = toQuery({ repo: { owner: "celery", name: "celery", ref: "main" }, lockfile: "requirements/default.txt", pythons: ["3.13"], platforms: ["linux-x86_64"] });
+  assert.equal(reqQuery, "repo=celery/celery&ref=main&lock=requirements/default.txt&py=3.13&t=linux-x86_64");
+  assert.deepEqual(fromQuery(`?${reqQuery}`), {
+    repo: { owner: "celery", name: "celery", ref: "main", dir: null, file: null },
+    lockfile: "requirements/default.txt",
+    pythons: ["3.13"],
+    platforms: ["linux-x86_64"],
+  });
   const odd = fromQuery("?repo=o/r&lock=../x&py=3.14,2.7,evil&t=linux-x86_64,amiga");
   assert.equal(odd.lockfile, null);
+  for (const bad of ["/x/requirements.txt", "a//b.txt", "./uv.lock", "a/./uv.lock"]) {
+    assert.equal(fromQuery(`?repo=o/r&lock=${encodeURIComponent(bad)}`).lockfile, null, bad);
+  }
   assert.deepEqual(odd.pythons, ["3.14"]);
   assert.deepEqual(odd.platforms, ["linux-x86_64"]);
   assert.equal(fromQuery("?repo=nope"), null);
@@ -184,7 +322,7 @@ test("the badge Markdown links the check of the repo alone, and names the lockfi
   const url = md.slice(badge.length + 1, -1);
   assert.doesNotMatch(url, /[\s()[\]<>"']/);
   // The page reads the link back as the same repo and file, with nothing else picked.
-  assert.deepEqual(fromQuery(new URL(url).search), { repo: { owner: "o", name: "r", ref: null, dir: null }, lockfile: odd, pythons: [], platforms: [] });
+  assert.deepEqual(fromQuery(new URL(url).search), { repo: { owner: "o", name: "r", ref: null, dir: null, file: null }, lockfile: odd, pythons: [], platforms: [] });
 });
 
 test("Pythons sort with each free-threaded build after its own", () => {
