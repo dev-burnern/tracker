@@ -330,3 +330,31 @@ test("noLockfile offers the PyPI package command when setup.cfg names one, and k
   assert.doesNotMatch(withoutPkg("verdict-detail").textContent, /Run uvx wheelgap in a checkout/);
   assert.deepEqual(withoutPkg("alerts").children, []);
 });
+
+test("the package fallback goes under the error when the lone root pyproject.toml can't be read", () => {
+  const source = read("check.mjs");
+  const fn = source.match(/^function onResult\(.*?^}$/ms);
+  assert.ok(fn, "onResult is in check.mjs");
+  const run = ({ lockfile = "pyproject.toml", projectName = "httpie", kind = "source", lockfiles = [{ path: lockfile, offline: false }] } = {}) => {
+    const calls = [];
+    const made = new Map();
+    const $ = (id) => (made.has(id) ? made.get(id) : made.set(id, { hidden: false, textContent: "" }).get(id));
+    const state = { lockfile, projectName, auto: true, plan: { lockfiles }, repo: { dir: null }, detected: { unreadable: [] } };
+    const onResult = new Function(
+      "state", "$", "status", "needsIndex", "unreadableReason", "withoutUnreadable", "pickLockfile", "runCheck", "showPackageFallback",
+      `${fn[0]}; return onResult;`,
+    )(
+      state, $, (text) => calls.push(["status", text]), () => calls.push(["needsIndex"]), checkLogic.unreadableReason,
+      checkLogic.withoutUnreadable, checkLogic.pickLockfile, () => calls.push(["runCheck"]), (name) => calls.push(["fallback", name]),
+    );
+    onResult({ kind, error: "pyproject.toml: [project] dependencies is dynamic (set by the build backend), so wheelgap can't read it" });
+    return calls;
+  };
+  const calls = run();
+  assert.match(calls[0][1], /^wheelgap couldn't read pyproject\.toml: /);
+  assert.deepEqual(calls[1], ["fallback", "httpie"]);
+  assert.deepEqual(run({ projectName: null }).map(([c]) => c), ["status"]);
+  // A pyproject.toml with another file to move on to is replaced by it, not answered with the package.
+  assert.deepEqual(run({ lockfiles: [{ path: "pyproject.toml" }, { path: "docs/requirements.txt" }] }), [["runCheck"]]);
+  assert.deepEqual(run({ lockfile: "requirements.txt" }).map(([c]) => c), ["status"]);
+});

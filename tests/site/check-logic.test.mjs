@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
-  cliCommand, packageCliCommand, projectNameFromMetadata, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  cliCommand, packageCliCommand, projectNameFromMetadata, metadataFiles, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
 
@@ -207,6 +207,39 @@ test("projectNameFromMetadata reads plain names from setup.cfg and pyproject.tom
   assert.equal(projectNameFromMetadata("pyproject.toml", "[project]\nname = 'my_pkg'\n"), "my_pkg");
   assert.equal(projectNameFromMetadata("pyproject.toml", '[tool.ruff]\nname = "nope"\n'), null);
   assert.equal(projectNameFromMetadata("setup.py", 'setup(name="ignored")\n'), null);
+});
+
+test("projectNameFromMetadata reads a setup.cfg as configparser does and a pyproject.toml's headers as TOML does", () => {
+  const cfg = (text) => projectNameFromMetadata("setup.cfg", text);
+  assert.equal(cfg("[metadata]\nName: httpie\n"), "httpie"); // keys are case-insensitive; ":" works like "="
+  assert.equal(cfg("[metadata] # comment\nname = httpie\n"), "httpie");
+  assert.equal(cfg("[metadata]\n  name = httpie\n"), "httpie"); // an indented first key is still a key
+  // Section names are case-sensitive, and an indented line after a key continues that key's value.
+  assert.equal(cfg("[METADATA]\nname = httpie\n"), null);
+  assert.equal(cfg("[ metadata ]\nname = httpie\n"), null);
+  assert.equal(cfg("[metadata]\ndescription = a tool\n  name = other\n"), null);
+  assert.equal(cfg("[metadata]\nname = httpie # inline comments aren't stripped\n"), null);
+  assert.equal(cfg("[metadata]\nname =\n  httpie\n"), null);
+  const toml = (text) => projectNameFromMetadata("pyproject.toml", text);
+  assert.equal(toml('[project] # the package\nname = "httpie"\n'), "httpie");
+  assert.equal(toml('[ project ]\nname = "httpie"\n'), "httpie");
+  // A name under any other table, an array of tables included, is never [project]'s.
+  assert.equal(toml('[build-system]\nrequires = ["setuptools"]\n[[tool.uv.index]] # torch\nname = "pytorch"\n'), null);
+  assert.equal(toml('[project]\nversion = "1"\n[tool.x] # c\nname = "nope"\n'), null);
+  assert.equal(toml('["project"]\nname = "unsure"\n'), null);
+});
+
+test("the project name is read from a lone root pyproject.toml, then a root setup.cfg, and only then", () => {
+  const pyproject = [{ path: "pyproject.toml", offline: false }];
+  assert.deepEqual(metadataFiles([], ["setup.cfg", "setup.py"]), ["setup.cfg"]);
+  assert.deepEqual(metadataFiles([], ["setup.py"]), []);
+  // The usual setuptools layout: a pyproject.toml with only [build-system], and the name in setup.cfg.
+  assert.deepEqual(metadataFiles(pyproject, ["pyproject.toml", "setup.cfg"]), ["pyproject.toml", "setup.cfg"]);
+  assert.deepEqual(metadataFiles(pyproject, ["pyproject.toml"]), ["pyproject.toml"]);
+  // Another file to check, or a pyproject.toml that isn't the root's: no package fallback.
+  assert.deepEqual(metadataFiles([...pyproject, { path: "requirements.txt", offline: false }], ["setup.cfg"]), []);
+  assert.deepEqual(metadataFiles([{ path: "app/pyproject.toml", offline: false }], ["setup.cfg"]), []);
+  assert.deepEqual(metadataFiles([], ["pkg/setup.cfg"]), []);
 });
 
 test("fixPrompt reproduces the check", () => {

@@ -254,21 +254,27 @@ export function cliCommand(result, pythons, platforms) {
 const PACKAGE_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
 
 // Read the published PyPI package name from a root setup.cfg ([metadata] name) or pyproject.toml ([project] name).
-// Only accepts a plain valid package name (never attr:, file:, or characters a package name can't have).
+// Only accepts a plain valid package name (never attr:, file:, or characters a package name can't have). Anything
+// read differently from configparser or TOML (a value continued on the next line, a quoted or dotted key) is null.
 export function projectNameFromMetadata(filename, text) {
   if (typeof text !== "string") return null;
   let section = null;
   if (filename === "setup.cfg") {
+    let key = false; // a key seen in this section: an indented line after it continues its value (configparser)
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim();
       if (!line || line.startsWith("#") || line.startsWith(";")) continue;
-      const hdr = line.match(/^\[([^\]]+)\]$/);
+      if (key && /^\s/.test(raw)) continue;
+      // configparser's section names are case-sensitive and run to the line's last "]"; setuptools reads [metadata].
+      const hdr = line.match(/^\[(.+)\]/);
       if (hdr) {
-        section = hdr[1].trim().toLowerCase();
+        section = hdr[1];
+        key = false;
         continue;
       }
+      key = true;
       if (section === "metadata") {
-        const m = line.match(/^name\s*[=:]\s*(.+?)\s*$/i);
+        const m = line.match(/^name\s*[=:]\s*(.*)$/i);
         if (m) {
           const val = m[1].trim();
           if (/^(?:attr|file)\s*:/i.test(val)) return null;
@@ -282,9 +288,14 @@ export function projectNameFromMetadata(filename, text) {
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim();
       if (!line || line.startsWith("#")) continue;
-      const hdr = line.match(/^\[([^\]]+)\]$/);
+      // [table] or [[array.of.tables]], with spaces inside the brackets and a comment after, as TOML allows.
+      const hdr = line.match(/^\[(\[?)\s*([^\[\]]*?)\s*\](\]?)\s*(?:#.*)?$/);
       if (hdr) {
-        section = hdr[1].trim();
+        section = hdr[1] || hdr[3] ? `[${hdr[2]}]` : hdr[2];
+        continue;
+      }
+      if (line.startsWith("[")) {
+        section = null; // a header this doesn't read (a quoted name): nothing under it is [project]'s
         continue;
       }
       if (section === "project") {
@@ -297,6 +308,15 @@ export function projectNameFromMetadata(filename, text) {
     }
   }
   return null;
+}
+
+// The root files load() reads a project name from, in order, when the page has nothing else to check: a lone root
+// pyproject.toml (it may fail to read: no [project] table, or dynamic dependencies), then a root setup.cfg. A
+// pyproject.toml with only [build-system] beside a setup.cfg is the usual setuptools layout, so both are tried.
+export function metadataFiles(lockfiles, paths) {
+  const lonePyproject = lockfiles.length === 1 && lockfiles[0].path === "pyproject.toml";
+  if (lockfiles.length && !lonePyproject) return [];
+  return [...(lonePyproject ? ["pyproject.toml"] : []), ...(paths.includes("setup.cfg") ? ["setup.cfg"] : [])];
 }
 
 // The `uvx wheelgap --deps <package>` command for a library published on PyPI.
