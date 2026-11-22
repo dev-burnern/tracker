@@ -1,6 +1,6 @@
 """Keep the tracker's old gap wheels index working: the wheels moved to wheelgap/wheels on 2026-11-16.
 
-    python3 scripts/build_gap_index.py gap-wheels.json _site
+    python3 scripts/build_gap_index.py gap-wheels.json _site [status.json]
 
 Reads wheelgap/wheels' data/gap-wheels.json (scan.yml downloads it from wheelgap.github.io/wheels/data/) and writes
 <site>/wheels/simple/index.html and <site>/wheels/simple/<project>/index.html, a PEP 503 index linking each wheel on
@@ -32,10 +32,36 @@ RELEASE_URL = "https://github.com/wheelgap/wheels/releases/download/gap-wheels/"
 ASSET = re.compile(r"[A-Za-z0-9._-]{1,200}\.whl", re.ASCII)
 SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
 PROJECT = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*", re.ASCII)
+SERVED_STATUSES = frozenset({"in-index", "yanked"})
 
 
 def canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def read_gap_status(path: Path | None) -> dict[tuple[str, str], str] | None:
+    """Current status by (canonical project, wheel filename), or None for the legacy fallback."""
+    if path is None:
+        return None
+    try:
+        if path.stat().st_size > 10_000_000:
+            raise ValueError("too large")
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        data = None
+    if (
+        not isinstance(data, dict)
+        or type(data.get("schema")) is not int
+        or data["schema"] != 1
+        or not isinstance(data.get("wheels"), list)
+        or any(
+            not isinstance(item, dict) or any(not isinstance(item.get(key), str) for key in ("project", "wheel", "status"))
+            for item in data["wheels"]
+        )
+    ):
+        print("::warning::status.json is missing or unusable, so the legacy gap index uses gap-wheels.json alone")
+        return None
+    return {(canonical(item["project"]), item["wheel"]): item["status"] for item in data["wheels"]}
 
 
 def usable(w: object) -> bool:
@@ -51,11 +77,15 @@ def usable(w: object) -> bool:
     )
 
 
-def projects(wheels: list) -> dict[str, list[dict]]:
+def projects(wheels: list, statuses: dict[tuple[str, str], str] | None = None) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for w in wheels:
-        if usable(w):
-            out.setdefault(canonical(w["name"]), []).append(w)
+        if not usable(w):
+            continue
+        proj = canonical(w["name"])
+        if statuses is not None and statuses.get((proj, w["wheel"])) not in SERVED_STATUSES:
+            continue
+        out.setdefault(proj, []).append(w)
     return {k: sorted(v, key=lambda w: w["wheel"]) for k, v in sorted(out.items())}
 
 
@@ -116,7 +146,7 @@ def moved_page() -> str:
 """
 
 
-def build(index_path: Path, site: Path) -> int:
+def build(index_path: Path, site: Path, status_path: Path | None = None) -> int:
     (site / "wheels").mkdir(parents=True, exist_ok=True)
     (site / "wheels" / "index.html").write_text(moved_page(), encoding="utf-8")
     try:
@@ -127,7 +157,8 @@ def build(index_path: Path, site: Path) -> int:
     if not isinstance(data, dict) or not isinstance(data.get("wheels"), list):
         print(f"gap wheels: no index, {index_path} has no wheels list", file=sys.stderr)
         return 1
-    by_project = projects(data["wheels"])
+    statuses = read_gap_status(status_path)
+    by_project = projects(data["wheels"], statuses)
     simple = site / "wheels" / "simple"
     simple.mkdir(parents=True, exist_ok=True)
     root_links = [f'<a href="{p}/">{p}</a>' for p in by_project]
@@ -145,4 +176,5 @@ def build(index_path: Path, site: Path) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(build(Path(sys.argv[1]), Path(sys.argv[2])))
+    status_arg = Path(sys.argv[3]) if len(sys.argv) > 3 else None
+    sys.exit(build(Path(sys.argv[1]), Path(sys.argv[2]), status_arg))
