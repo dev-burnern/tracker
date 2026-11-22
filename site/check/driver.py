@@ -17,7 +17,10 @@ tests/test_check_driver.py runs it under CPython with the wheelgap version worke
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 
 import wheelgap
 from packaging.utils import canonicalize_name
@@ -38,6 +41,16 @@ LOOKUPS = tuple(name for name in LOCKFILES if name not in OFFLINE) + ("pyproject
 GAPS = (Status.SOURCE, Status.MISSING)  # no wheel; UNKNOWN (couldn't be checked) is reported apart
 MAX_LOCKFILES = 30
 MAX_DOCKERFILES = 40
+
+# Public extra indexes whose presence in a requirements file does not make the rest of the file's packages private.
+# Adding a host is a reviewed change; each entry names who runs it and the packages that index may serve instead of PyPI.
+PUBLIC_EXTRA_INDEXES: dict[str, frozenset[str]] = {
+    # PyTorch Foundation (Linux Foundation) — official CUDA/ROCm/CPU wheels for PyTorch.
+    "download.pytorch.org": frozenset({"torch", "torchvision", "torchaudio"}),
+}
+_PRIVATE_INDEX_FLAGS = frozenset({"--index-url", "-i", "--find-links", "-f", "--no-index"})
+_INCLUDE_FLAGS = frozenset({"-r", "--requirement", "-c", "--constraint"})
+_UV_INDEX_RE = re.compile(r"\b(?:index-url|extra-index-url|find-links|no-index)\b|\[\[tool\.uv\.index\]\]|\[tool\.uv\.sources\]")
 
 try:
     from wheelgap import gapwheels
@@ -177,7 +190,85 @@ def detect(root: str) -> str:
     )
 
 
-def _private(source: Source, pkg: Package) -> bool:
+def _public_extra_indexes(root: Path, path: Path) -> list[str] | None:
+    """Return sorted allowlisted hosts if every index option in `path` (and its includes) is a credential-free
+    `--extra-index-url` on PUBLIC_EXTRA_INDEXES and no sibling pyproject.toml/uv.toml names an index; else None."""
+    resolved_root = root.resolve()
+    for folder in {path.parent, root}:
+        if (folder / "uv.toml").exists():
+            return None
+        pyproject = folder / "pyproject.toml"
+        if pyproject.exists():
+            try:
+                if _UV_INDEX_RE.search(pyproject.read_text(encoding="utf-8")):
+                    return None
+            except OSError:
+                return None
+    hosts: set[str] = set()
+    seen: set[Path] = set()
+    stack = [path]
+    while stack:
+        current = stack.pop().resolve()
+        if current in seen:
+            continue
+        if not current.is_relative_to(resolved_root):
+            return None
+        seen.add(current)
+        try:
+            raw_lines = current.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return None
+        logical: list[str] = []
+        buf = ""
+        for raw in raw_lines:
+            if raw.endswith("\\"):
+                buf += raw[:-1]
+                continue
+            logical.append(buf + raw)
+            buf = ""
+        if buf:
+            logical.append(buf)
+        for line in logical:
+            stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            try:
+                tokens = shlex.split(stripped)
+            except ValueError:
+                return None
+            i = 0
+            while i < len(tokens):
+                tok = tokens[i]
+                flag, eq, val = tok.partition("=")
+                if flag in _PRIVATE_INDEX_FLAGS:
+                    return None
+                if flag == "--extra-index-url":
+                    if not eq:
+                        i += 1
+                        if i >= len(tokens):
+                            return None
+                        val = tokens[i]
+                    parsed = urlparse(val)
+                    if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None:
+                        return None
+                    host = (parsed.hostname or "").lower()
+                    if host not in PUBLIC_EXTRA_INDEXES:
+                        return None
+                    hosts.add(host)
+                elif flag in _INCLUDE_FLAGS:
+                    if not eq:
+                        i += 1
+                        if i >= len(tokens):
+                            return None
+                        val = tokens[i]
+                    if "://" in val:
+                        return None
+                    stack.append(current.parent / val)
+                i += 1
+    return sorted(hosts) if hosts else None
+
+
+def _private(source: Source, pkg: Package, *, allow_public_extra: bool = False) -> bool:
     """Whether a package that needs a lookup has to stay off pypi.org.
 
     One whose lock names another index for it (a Pipfile.lock source, a pixi.lock index) always does, as with the
@@ -188,10 +279,14 @@ def _private(source: Source, pkg: Package) -> bool:
     """
     if not pypi.may_look_up(pkg.registry):
         return True
+    if allow_public_extra:
+        return False
     return source.kind != "pixi" and not source.pypi_only
 
 
-def _lookups(source: Source) -> list[Package]:
+def _lookups(
+    source: Source, *, allow_public_extra: bool = False, extra_pkg_hosts: dict[str, str] | None = None
+) -> list[Package]:
     """The packages of `source` to look up on pypi.org, as pypi.fill_all() picks them: not skipped, no files (or only
     the ones a pixi.lock recorded), and no error from parsing, which a lookup would hide. One that has to stay off
     pypi.org is marked skipped as `private index` instead."""
@@ -199,8 +294,11 @@ def _lookups(source: Source) -> list[Package]:
     for pkg in source.packages:
         if pkg.skip or not (pkg.files is None or pkg.partial_files):
             continue
-        if _private(source, pkg):
+        if _private(source, pkg, allow_public_extra=allow_public_extra):
             pkg.skip = "private index"
+        elif extra_pkg_hosts and canonicalize_name(pkg.name) in extra_pkg_hosts:
+            host = extra_pkg_hosts[canonicalize_name(pkg.name)]
+            pkg.error = f"may be installed from {host}, which this page doesn't read"
         elif not pkg.error:
             todo.append(pkg)
     return todo
@@ -235,14 +333,27 @@ def needs(root: str, path: str) -> str:
         return json.dumps({"error": f"{inc} (an include) isn't fetched yet", "kind": "include", "path": inc})
     except (SourceError, ValueError, OSError) as e:  # ValueError: a file that isn't valid TOML or JSON
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
+    extra_hosts = (
+        _public_extra_indexes(Path(root), Path(root) / path)
+        if source.kind == "requirements" and not source.pypi_only
+        else None
+    )
+    extra_pkg_hosts = {pkg: host for host in (extra_hosts or ()) for pkg in PUBLIC_EXTRA_INDEXES[host]}
     lookups = {
         _lookup_key(pkg): {"name": canonicalize_name(pkg.name), "version": pkg.version or None}
-        for pkg in _lookups(source)
+        for pkg in _lookups(source, allow_public_extra=bool(extra_hosts), extra_pkg_hosts=extra_pkg_hosts)
     }
     return json.dumps({"lookups": list(lookups.values()), "total": len(lookups)})
 
 
-def _fill_lookups(source: Source, targets: list[Target], lookups: dict) -> None:
+def _fill_lookups(
+    source: Source,
+    targets: list[Target],
+    lookups: dict,
+    *,
+    allow_public_extra: bool = False,
+    extra_pkg_hosts: dict[str, str] | None = None,
+) -> None:
     """Fill each package that needs it from the PyPI JSON the worker fetched, the way pypi.fill() does: a pinned
     package from its release's files, a range resolved for each target Python's major.minor (3.14 for 3.14t, as the
     CLI passes them: Requires-Python is compared with a version, and `3.14t` isn't one). A package that wasn't
@@ -251,7 +362,7 @@ def _fill_lookups(source: Source, targets: list[Target], lookups: dict) -> None:
     _fill_json_data reads as an empty list when the key is missing, and no files reads as "can't install"."""
     base = pypi.index_url()
     pythons = tuple(dict.fromkeys(f"{t.major}.{t.minor}" for t in targets))
-    for pkg in _lookups(source):
+    for pkg in _lookups(source, allow_public_extra=allow_public_extra, extra_pkg_hosts=extra_pkg_hosts):
         data = lookups.get(_lookup_key(pkg))
         reads_urls = bool(pkg.version) or not pkg.spec  # a range reads `releases`, and says so when it's missing
         if isinstance(data, dict) and (not reads_urls or isinstance(data.get("urls"), list)):
@@ -293,8 +404,20 @@ def check(root: str, lockfile: str, options_json: str, lookups_json: str | None 
     except (SourceError, ValueError, OSError) as e:  # ValueError: a lockfile that isn't valid TOML or JSON
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
     looked_up = path.name not in OFFLINE
+    extra_hosts = (
+        _public_extra_indexes(Path(root), path)
+        if looked_up and source.kind == "requirements" and not source.pypi_only
+        else None
+    )
+    extra_pkg_hosts = {pkg: host for host in (extra_hosts or ()) for pkg in PUBLIC_EXTRA_INDEXES[host]}
     if looked_up:
-        _fill_lookups(source, targets, json.loads(lookups_json) if lookups_json else {})
+        _fill_lookups(
+            source,
+            targets,
+            json.loads(lookups_json) if lookups_json else {},
+            allow_public_extra=bool(extra_hosts),
+            extra_pkg_hosts=extra_pkg_hosts,
+        )
         # As api._check_lockfile() builds them, which can't be asked: it refuses a pyproject.toml and does its own
         # lookups with urllib. A package no target installs (its marker rules it out everywhere) isn't a row.
         check_rows = [r for r in api.check([source], targets) if r.needed]
@@ -340,17 +463,18 @@ def check(root: str, lockfile: str, options_json: str, lookups_json: str | None 
         if gaps or unknown:
             keep = [t.label(True) for t in counted if r.statuses.get(t) is Status.WHEEL]
             lookup = bool(gaps and r.version) and on_pypi.get((canonicalize_name(r.name), r.version), False)
-            rows.append(
-                {
-                    "name": r.name,
-                    "version": r.version,
-                    "statuses": statuses,
-                    "gaps": gaps,
-                    "unknown": unknown,
-                    "keep": keep,
-                    "lookup": lookup,
-                }
-            )
+            row_entry = {
+                "name": r.name,
+                "version": r.version,
+                "statuses": statuses,
+                "gaps": gaps,
+                "unknown": unknown,
+                "keep": keep,
+                "lookup": lookup,
+            }
+            if host := extra_pkg_hosts.get(canonicalize_name(r.name)):
+                row_entry["reason"] = f"may be installed from {host}, which this page doesn't read"
+            rows.append(row_entry)
     return json.dumps(
         {
             "wheelgap": wheelgap.__version__,
@@ -362,6 +486,7 @@ def check(root: str, lockfile: str, options_json: str, lookups_json: str | None 
             "listed": len(source.packages),
             "skipped": sorted({p.name for p in source.packages if p.skip}),
             "private": sorted({p.name for p in source.packages if p.skip == "private index"}),
+            "extra_indexes": extra_hosts or [],
             "looked_up": looked_up,
             "per_target": per_target,
             "rows": rows,

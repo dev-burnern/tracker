@@ -267,9 +267,12 @@ function renderVerdict() {
   const missed = missedText(r.missed, r.lockfile);
   if (missed) alerts.push(el("p", { class: "alert warn", text: missed }));
   const some = (names) => `${names.slice(0, 8).join(", ")}${names.length > 8 ? `, and ${names.length - 8} more` : ""}`;
+  for (const host of r.extra_indexes || []) {
+    alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} also installs from ${host} (--extra-index-url). This page checked PyPI only.` }));
+  }
   const privateIndex = r.private || [];
   if (privateIndex.length) {
-    alerts.push(el("p", { class: "alert warn", text: `Not checked: ${r.lockfile} names an index or source other than PyPI (an --index-url or --extra-index-url line, a [tool.uv] index or sources setting, a Pipfile source), so these may not be PyPI's packages and their names aren't sent to pypi.org: ${some(privateIndex)}. To check them on that index, run uvx wheelgap --index-url with its URL in a checkout.` }));
+    alerts.push(el("p", { class: "alert warn", text: `Not checked: ${r.lockfile} names an index or source other than PyPI (an --index-url or --extra-index-url line, a [tool.uv] index or sources setting, a Pipfile source), so these may not be PyPI's packages and their names aren't sent to pypi.org: ${some(privateIndex)}. To check them on PyPI's files, run uvx wheelgap ${r.lockfile} in a checkout.` }));
   }
   const skipped = r.skipped.filter((name) => !privateIndex.includes(name));
   if (skipped.length) {

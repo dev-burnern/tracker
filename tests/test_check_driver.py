@@ -339,6 +339,58 @@ def test_needs_skips_private_index_packages(tmp_path):
     assert r["private"] == ["fastlib", "numpy"] and r["packages"] == 0 and r["rows"] == []
 
 
+def test_pytorch_extra_index_checks_pypi_packages_and_marks_torch_unknown(tmp_path):
+    (tmp_path / "requirements.txt").write_text(
+        "--extra-index-url https://download.pytorch.org/whl/cu128\n"
+        "torch==2.6.0\n"
+        "torchvision==0.21.0\n"
+        "purewheel==3.1\n",
+        encoding="utf-8",
+    )
+    needed = json.loads(driver.needs(str(tmp_path), "requirements.txt"))
+    assert needed["lookups"] == [{"name": "purewheel", "version": "3.1"}]
+
+    lookups = {
+        "purewheel==3.1": {"info": {"version": "3.1"}, "urls": [{"filename": "purewheel-3.1-py3-none-any.whl"}]},
+    }
+    res = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), json.dumps(lookups)))
+    assert res["private"] == []
+    assert res["extra_indexes"] == ["download.pytorch.org"]
+    assert res["packages"] == 3
+    by_name = {row["name"]: row for row in res["rows"]}
+    assert set(by_name) == {"torch", "torchvision"}
+    assert by_name["torch"]["gaps"] == []
+    assert len(by_name["torch"]["unknown"]) == 3
+    assert by_name["torch"]["reason"] == "may be installed from download.pytorch.org, which this page doesn't read"
+
+    # Adding --index-url alongside PyTorch's --extra-index-url keeps the whole file private.
+    (tmp_path / "requirements.txt").write_text(
+        "--extra-index-url https://download.pytorch.org/whl/cu128\n"
+        "--index-url https://private.example/simple\n"
+        "purewheel==3.1\n",
+        encoding="utf-8",
+    )
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt"))["lookups"] == []
+    priv = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), "{}"))
+    assert priv["private"] == ["purewheel"] and priv["extra_indexes"] == []
+
+    # Credentials in a listed host's URL keep the file private, and the URL never appears in the result.
+    secret_url = "https://user:s3cr3t@download.pytorch.org/whl/cu128"
+    (tmp_path / "requirements.txt").write_text(f"--extra-index-url {secret_url}\npurewheel==3.1\n", encoding="utf-8")
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt"))["lookups"] == []
+    raw_res = driver.check(str(tmp_path), "requirements.txt", options(), "{}")
+    assert "s3cr3t" not in raw_res and secret_url not in raw_res
+    assert json.loads(raw_res)["private"] == ["purewheel"]
+
+    # An --extra-index-url in an included file is recognized too.
+    (tmp_path / "torch.txt").write_text("--extra-index-url https://download.pytorch.org/whl/cpu\ntorch==2.6.0\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("-r torch.txt\npurewheel==3.1\n", encoding="utf-8")
+    inc_needed = json.loads(driver.needs(str(tmp_path), "requirements.txt"))
+    assert inc_needed["lookups"] == [{"name": "purewheel", "version": "3.1"}]
+    inc_res = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), json.dumps(lookups)))
+    assert inc_res["extra_indexes"] == ["download.pytorch.org"] and inc_res["private"] == []
+
+
 def test_needs_reads_a_pyprojects_direct_requirements(tmp_path):
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0.1.0"\ndependencies = ["numpy==2.3.4", "demo"]\n',

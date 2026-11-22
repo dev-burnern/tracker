@@ -282,3 +282,63 @@ test("the badge is a small static image on the page's own origin, offered as Mar
   assert.match(page, /\$\("copy-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.doesNotMatch(page, /innerHTML/);
 });
+
+test("renderVerdict alerts on public extra indexes and avoids --index-url advice for private indexes", () => {
+  const source = read("check.mjs");
+  const rv = source.match(/^function renderVerdict\(\) \{.*?^}$/ms);
+  assert.ok(rv, "renderVerdict is in check.mjs");
+
+  const run = (resultExtra) => {
+    const made = new Map();
+    const element = (key) => {
+      if (!made.has(key)) {
+        made.set(key, {
+          hidden: null,
+          textContent: "",
+          children: [],
+          classList: { toggle() {} },
+          closest: () => element(`${key} section`),
+          replaceChildren(...kids) { this.children = kids; },
+        });
+      }
+      return made.get(key);
+    };
+    const el = (tag, attrs = {}, ...kids) => ({ tag, attrs, kids });
+    const state = {
+      repo: { owner: "o", name: "r" },
+      ref: "main",
+      pythons: ["3.13"],
+      platforms: ["linux-x86_64"],
+      result: {
+        lockfile: "requirements.txt",
+        packages: 2,
+        targets: [{ label: "3.13 linux-x86_64", python: "3.13", platform: "linux-x86_64" }],
+        outside_lock: [],
+        rows: [],
+        skipped: [],
+        private: [],
+        extra_indexes: [],
+        looked_up: true,
+        ...resultExtra,
+      },
+    };
+    const renderVerdict = new Function(
+      "$", "state", "el", "headline", "verdictText", "nextSteps", "sortPythons", "missedText",
+      `${rv[0]}; return renderVerdict;`,
+    )(
+      element, state, el, checkLogic.headline, checkLogic.verdictText, checkLogic.nextSteps,
+      checkLogic.sortPythons, checkLogic.missedText,
+    );
+    renderVerdict();
+    return element("alerts").children.map((c) => c.attrs.text);
+  };
+
+  const extraAlerts = run({ extra_indexes: ["download.pytorch.org"] });
+  assert.ok(
+    extraAlerts.includes("requirements.txt also installs from download.pytorch.org (--extra-index-url). This page checked PyPI only."),
+  );
+
+  const privAlerts = run({ private: ["corp-pkg"], skipped: ["corp-pkg"] });
+  assert.ok(privAlerts.some((t) => t.includes("run uvx wheelgap requirements.txt in a checkout")));
+  assert.ok(privAlerts.every((t) => !t.includes("run uvx wheelgap --index-url")));
+});
