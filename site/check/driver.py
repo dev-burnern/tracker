@@ -25,7 +25,7 @@ from packaging.utils import canonicalize_name
 from wheelgap import api, offline, origin, pypi, sources, suggest_targets
 from wheelgap import suggest as release_suggest
 from wheelgap.check import Row, Status
-from wheelgap.sources import LOCKFILES, Package, Source, SourceError, load_file, pythons_outside_lock
+from wheelgap.sources import LOCKFILES, Package, Source, SourceError, file_kind, load_file, pythons_outside_lock
 from wheelgap.targets import DEFAULT_PLATFORMS, NEWEST_PYTHON, Target, TargetError
 
 # The lockfiles that list each package's files, so they can be checked without asking an index. The other
@@ -35,10 +35,23 @@ from wheelgap.targets import DEFAULT_PLATFORMS, NEWEST_PYTHON, Target, TargetErr
 # requirements only, as `uvx wheelgap requirements.txt` checks them. And even a listed lockfile can leave a
 # package's files out; check() catches that below.
 OFFLINE = ("uv.lock", "pylock.toml", "poetry.lock", "pdm.lock")
+# The readers of those lockfiles (sources.file_kind's names for them). A file a link names is read by the reader its
+# name picks (pylock.dev.toml as a pylock.toml, uv-py312.lock as a uv.lock), so it's checked offline by that, not by
+# its exact name: read as a lookups file, a Python its lock leaves out would show false gaps.
+OFFLINE_KINDS = ("uv", "pylock", "poetry", "pdm")
 LOOKUPS = tuple(name for name in LOCKFILES if name not in OFFLINE) + ("pyproject.toml",)
 GAPS = (Status.SOURCE, Status.MISSING)  # no wheel; UNKNOWN (couldn't be checked) is reported apart
 MAX_LOCKFILES = 30
 MAX_DOCKERFILES = 40
+# The installer settings files wheelgap reads from a requirements file's, a pyproject.toml's or a Pipfile.lock's
+# folder and every folder above it, up to the repository root, to tell whether they point an installer at another
+# index (sources._nearby_config_names_an_index, which reads sources._CONFIG_FILES): uv applies [tool.uv] to
+# `uv pip install -r`, and `uv export` writes no index lines. NEARBY_CONFIG_READERS are the readers (load_file's
+# `kind`) that call it. The browser has only the files the worker fetched, so the worker fetches these for the file
+# being checked (configs_for), and needs() and check() keep the file private when one the repo has isn't there to
+# read. tests/test_check_driver.py checks both lists against the pinned release.
+CONFIG_NAMES = ("uv.toml", "pyproject.toml", "pdm.toml")
+NEARBY_CONFIG_READERS = ("requirements", "pyproject", "pipfile")
 
 # Public extra indexes: a requirements file whose only index options are an --extra-index-url to one of these is still
 # looked up on PyPI (pip asks PyPI for every name too, so none is private). Adding a host is a reviewed change; each
@@ -51,10 +64,6 @@ PUBLIC_EXTRA_INDEXES: dict[str, frozenset[str]] = {
 # the URL https on a lowercase host with a plain path: no user@, port, quote, ${VAR}, %, ?, # or backslash, which pip
 # could read as something else. Anything else wheelgap counts as an index option keeps the file private.
 _PUBLIC_EXTRA_LINE = re.compile(r"--extra-index-url(?:=|[ \t]+)https://([a-z0-9.-]+)(?:/[A-Za-z0-9._~/-]*)?")
-# The installer settings files wheelgap reads from a requirements file's folder and the folders above it
-# (sources._nearby_config_names_an_index): uv applies [tool.uv] to `uv pip install -r`.
-CONFIG_NAMES = ("uv.toml", "pyproject.toml", "pdm.toml")
-
 try:
     from wheelgap import gapwheels
 except ImportError:  # the pinned release may predate --fix
@@ -99,9 +108,50 @@ def gap_wheels(list_json: str) -> str:
     )
 
 
+def _reads_offline(path: str) -> bool:
+    """Whether wheelgap reads `path` as a lockfile that lists its packages' files (OFFLINE_KINDS), by its name."""
+    try:
+        return file_kind(Path(path)) in OFFLINE_KINDS
+    except SourceError:  # a name wheelgap doesn't read: load_file reports it
+        return False
+
+
 def _skipped_folder(parts: tuple[str, ...]) -> bool:
     """A folder wheelgap --suggest-targets doesn't look in (hidden, node_modules, ...), or a vendored test fixture."""
     return any(p.startswith(".") or p in suggest_targets._SKIP_DIRS for p in parts)
+
+
+# Text files in a requirements/ folder that aren't requirements files, by the start of their name (any case), as
+# wheelgap's `wheelgap DIR` leaves them out (sources._NOT_REQUIREMENTS, after 0.13.0).
+_NOT_REQUIREMENTS = (
+    *("constraint", "readme", "license", "licence", "copying", "notice", "changelog", "changes"),
+    *("history", "authors", "contributing", "todo", "notes"),
+)
+
+
+def _is_extra_requirements(pp: PurePosixPath) -> bool:
+    """A *.txt file whose name or folder marks it as a requirements file, under a name other than requirements.txt:
+    requirements*.txt, *-requirements.txt, *_requirements.txt, or a .txt in a folder named requirements (not
+    constraints, README.txt and the like). Case-sensitive, as wheelgap reads a file as requirements only by `.txt`."""
+    name = pp.name
+    if not name.endswith(".txt") or name in LOCKFILES or name.lower().startswith(_NOT_REQUIREMENTS):
+        return False
+    if name.startswith("requirements") or name.endswith(("-requirements.txt", "_requirements.txt")):
+        return True
+    return len(pp.parts) >= 2 and pp.parts[-2] == "requirements"
+
+
+def _lockfile_sort_key(path: str) -> tuple[int, int, int, int, str]:
+    """Every exactly-named file first, as before: shallowest, then in wheelgap's order, a pyproject.toml after the
+    lockfiles in its folder. Requirements files under other names come after all of those, shallowest then by name:
+    which one holds the project's dependencies can't be told from the name, so the page never picks one of them over
+    another file, and with several it asks (autoPick() in check-logic.mjs), as `wheelgap DIR` lists them."""
+    pp = PurePosixPath(path)
+    if pp.name in LOCKFILES:
+        return (0, path.count("/"), 0, LOCKFILES.index(pp.name), path)
+    if pp.name == "pyproject.toml":
+        return (0, path.count("/"), 1, 0, path)
+    return (1, path.count("/"), 0, 0, path)
 
 
 def plan(paths_json: str) -> str:
@@ -118,35 +168,95 @@ def plan(paths_json: str) -> str:
             continue
         if _skipped_folder(folders):
             continue
-        if pp.name in LOCKFILES or pp.name == "pyproject.toml":
+        if pp.name in LOCKFILES or pp.name == "pyproject.toml" or _is_extra_requirements(pp):
             lockfiles.append(p)
         kind = suggest_targets._container_kind(pp.name)
         if kind == "file":
             dockerfiles.append(p)
         elif kind == "template":
             templates.append(p)
-    # A pyproject.toml comes after the lockfiles in the same folder, so a uv.lock next to one is still picked first.
-    lockfiles.sort(
-        key=lambda p: (
-            p.count("/"),
-            PurePosixPath(p).name not in LOCKFILES,
-            LOCKFILES.index(PurePosixPath(p).name) if PurePosixPath(p).name in LOCKFILES else 0,
-            p,
-        )
-    )
+    # A pyproject.toml comes after the lockfiles in the same folder; requirements files under other names come last.
+    lockfiles.sort(key=_lockfile_sort_key)
     dockerfiles.sort(key=lambda p: (p.count("/"), p))
     return json.dumps(
         {
-            "lockfiles": [{"path": p, "offline": PurePosixPath(p).name in OFFLINE} for p in lockfiles[:MAX_LOCKFILES]],
+            "lockfiles": [
+                {"path": p, "offline": _reads_offline(p)}
+                | ({"other": True} if _is_extra_requirements(PurePosixPath(p)) else {})
+                for p in lockfiles[:MAX_LOCKFILES]
+            ],
             "workflows": sorted(workflows),
             "dockerfiles": dockerfiles[:MAX_DOCKERFILES],
             "more_dockerfiles": max(0, len(dockerfiles) - MAX_DOCKERFILES),
             "templates": sorted(templates),
             "python_version": ".python-version" if ".python-version" in paths else None,
-            # Every installer settings file in the repo, wherever it is, for _public_extra_hosts().
-            "configs": sorted(p for p in paths if PurePosixPath(p).name in CONFIG_NAMES),
+            # Every installer settings file in the repo, wherever it is: configs_for() picks the ones a check reads.
+            # In any case: on a case-insensitive disk (macOS, Windows) wheelgap reads a Pyproject.toml too.
+            "configs": sorted(p for p in paths if PurePosixPath(p).name.lower() in CONFIG_NAMES),
         }
     )
+
+
+def _reads_nearby_configs(path: str) -> bool:
+    """Whether wheelgap's reader for `path` reads the installer settings files near it (NEARBY_CONFIG_READERS)."""
+    try:
+        return file_kind(Path(path)) in NEARBY_CONFIG_READERS
+    except SourceError:  # not a file wheelgap reads: check() says so
+        return False
+
+
+def _configs_near(path: str, configs: list[str], *, any_case: bool = False) -> list[str]:
+    """The paths in `configs` that wheelgap reads for `path`: in its folder or a folder above it, by CONFIG_NAMES.
+    `any_case`: also the ones named so in another case (Pyproject.toml), which wheelgap reads on a case-insensitive
+    disk but not on the browser's, so they can only ever count as unread."""
+    folder = PurePosixPath(path).parent
+    folders = {folder, *folder.parents}
+    return sorted(
+        c
+        for c in configs
+        if (PurePosixPath(c).name.lower() if any_case else PurePosixPath(c).name) in CONFIG_NAMES
+        and PurePosixPath(c).parent in folders
+    )
+
+
+def _configs_listing(configs_json: str | None) -> list[str] | None:
+    """plan()'s `configs` as the worker passes it, or None when it doesn't know them (a truncated file list)."""
+    try:
+        configs = json.loads(configs_json) if configs_json else None
+    except ValueError:
+        return None
+    if isinstance(configs, list) and all(isinstance(c, str) for c in configs):
+        return configs
+    return None
+
+
+def configs_for(path: str, configs_json: str | None) -> str:
+    """The installer settings files the worker fetches before `path` is checked: the ones in the repo (plan()'s
+    `configs`) that wheelgap would read for it from disk, in its folder or a folder above it. Empty for a file whose
+    reader reads none (a lockfile read offline, a pixi.lock), or when the repo's list isn't known."""
+    configs = _configs_listing(configs_json)
+    if configs is None or not _reads_nearby_configs(path):
+        return json.dumps([])
+    return json.dumps(_configs_near(path, configs))
+
+
+def _unread_configs(root: str, path: str, configs_json: str | None) -> dict | None:
+    """Why `path` has to stay private because wheelgap couldn't read every installer settings file it would on disk,
+    or None when it could (or reads none). `unknown`: the repo's list of them isn't known (GitHub cut the file list
+    short, or the worker didn't pass it), so one may be missing. `unread`: ones the repo has that the worker didn't
+    manage to fetch, or that are named in another case (Pyproject.toml: read on a macOS or Windows checkout, never
+    fetched here). Either way wheelgap would take the file as PyPI-only without them, so the page doesn't."""
+    if not _reads_nearby_configs(path):
+        return None
+    configs = _configs_listing(configs_json)
+    if configs is None:
+        return {"unknown": True, "unread": []}
+    unread = [
+        c
+        for c in _configs_near(path, configs, any_case=True)
+        if PurePosixPath(c).name not in CONFIG_NAMES or not (Path(root) / c).is_file()
+    ]
+    return {"unknown": False, "unread": unread} if unread else None
 
 
 def _python_version_file(root: Path) -> str | None:
@@ -202,17 +312,21 @@ def _public_extra_hosts(root: str, path: str, configs_json: str | None) -> list[
     The option lines are the ones wheelgap's own reader collects as possibly naming an index
     (sources._read_requirements: the file and its includes, read as utf-8-sig with pip's line joining, comments and
     abbreviations; an include it can't read counts too), so this never reads a line differently from it. Each must be
-    a whole _PUBLIC_EXTRA_LINE on a listed host. And no installer settings file may be in the file's folder or above:
-    on disk, as wheelgap checks it; and in the repo, from `configs` (plan()'s list of them, which the worker passes),
-    since the browser doesn't fetch them. Without that list nothing is certain. When the worker's wheelgap pin
-    changes, re-check that _read_requirements still has this signature: if it doesn't, this fails closed."""
-    configs = json.loads(configs_json) if configs_json else None
-    if not isinstance(configs, list) or not all(isinstance(c, str) for c in configs):
+    a whole _PUBLIC_EXTRA_LINE on a listed host.
+
+    And no installer settings file may be in the file's folder or above. First, every one the repo has there must
+    have been read (_unread_configs: the worker fetches them, configs_for; without the repo's list, or with one it
+    couldn't fetch, nothing is certain), since _private() returns before it reads source.pypi_only for a file taken
+    as public, and so would otherwise skip that check. Then, even a read one keeps the file private, whether or not it
+    names an index (wheelgap's on-disk check below would already catch one that does): the allowlist is for a plain
+    requirements file, and a project's own uv or pdm settings are another installer setup this doesn't vouch for.
+    When the worker's wheelgap pin changes, re-check that _read_requirements still has this signature: if it doesn't,
+    this fails closed."""
+    if _unread_configs(root, path, configs_json):
         return []
-    folder = PurePosixPath(path).parent
-    for config in map(PurePosixPath, configs):
-        if config.name in CONFIG_NAMES and (config.parent == folder or config.parent in folder.parents):
-            return []
+    configs = _configs_listing(configs_json)
+    if configs is None or _configs_near(path, configs, any_case=True):
+        return []
     file = Path(root) / path
     found: list[str] = []
     try:
@@ -237,7 +351,10 @@ def _private(source: Source, pkg: Package, *, allow_public_extra: bool = False) 
     CLI. A pixi.lock records where each of its files came from, so that is all there is to ask of it. A
     requirements file, a pyproject.toml or a Pipfile.lock names an index for the whole input, if it names one
     (an --index-url or --extra-index-url line, an installer's index setting, a Pipfile source), so none of its
-    packages is known to be PyPI's: the page looks none of them up and says so, where the CLI would ask PyPI.
+    packages is known to be PyPI's: the page looks none of them up and says so, where the CLI would ask PyPI. That
+    includes a uv.toml, pyproject.toml or pdm.toml beside it or above it naming one, and one the page couldn't read
+    (see _unread_configs). `allow_public_extra`: the file's only other index is a public one (_public_extra_hosts,
+    which makes every one of those checks itself first), so its packages are looked up on PyPI after all.
     """
     if not pypi.may_look_up(pkg.registry):
         return True
@@ -272,6 +389,15 @@ def _lookup_key(pkg: Package) -> str:
     return f"{name}=={pkg.version}" if pkg.version else name
 
 
+def _keep_private_without_configs(source: Source, root: str, path: str, configs_json: str | None) -> dict | None:
+    """As wheelgap does with a settings file it can't read: a file whose nearby settings files weren't all read is
+    not known to be PyPI-only (_unread_configs says why)."""
+    why = _unread_configs(root, path, configs_json)
+    if why:
+        source.pypi_only = False
+    return why
+
+
 def needs(root: str, path: str, configs_json: str | None = None) -> str:
     """The PyPI lookups checking `path` needs: every package wheelgap's pypi.fill_all() would look up, with its
     canonical name and pinned version or null, each once. A package that has to stay off pypi.org (see _private) is
@@ -280,8 +406,11 @@ def needs(root: str, path: str, configs_json: str | None = None) -> str:
     Requirements includes (-r, -c) are read from disk, so the worker fetches them first: a missing one comes back
     as an error of kind `include` with its `path` in the repo, and the worker fetches it and asks again. One outside
     the repo has no `path`. Any other error is left to check(), which reports it.
+
+    configs: plan()'s `configs`, the repo's installer settings files, or null when GitHub cut the file list short.
+    The worker fetches the ones configs_for() names first; with any of them missing, or no list, nothing is looked up.
     """
-    if PurePosixPath(path).name in OFFLINE:
+    if _reads_offline(path):
         return json.dumps({"lookups": [], "total": 0})
     try:
         source = load_file(Path(root) / path)
@@ -295,6 +424,7 @@ def needs(root: str, path: str, configs_json: str | None = None) -> str:
         return json.dumps({"error": f"{inc} (an include) isn't fetched yet", "kind": "include", "path": inc})
     except (SourceError, ValueError, OSError) as e:  # ValueError: a file that isn't valid TOML or JSON
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
+    _keep_private_without_configs(source, root, path, configs_json)
     extra_hosts = (
         _public_extra_hosts(root, path, configs_json) if source.kind == "requirements" and not source.pypi_only else []
     )
@@ -348,9 +478,15 @@ def check(
     release's files for every Python, so nothing is `outside_lock` there: like the CLI, a pyproject.toml is checked
     on the targets asked for, whatever its requires-python.
 
+    configs: as for needs(). The result's `configs` are the installer settings files beside the file or above it that
+    were read; `configs_unread` the ones the repo has there that couldn't be fetched, and `configs_unknown` says the
+    repo's list of them wasn't known: either keeps every package of the file off pypi.org.
+
     The result's `private` names the packages left off pypi.org as a private index's (they're in `skipped` too),
     and `looked_up` says whether the files came from PyPI rather than from the lockfile. `listed` counts the packages
     the file lists, checked or not: none at all for a pyproject.toml whose [project] has no dependencies.
+    `private_count` counts entries too, not distinct names: two requirements for one name with different markers
+    must both count when the page asks whether every entry was skipped as private.
     """
     global _last_check
     _last_check = None
@@ -365,7 +501,9 @@ def check(
         source = load_file(path)
     except (SourceError, ValueError, OSError) as e:  # ValueError: a lockfile that isn't valid TOML or JSON
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
-    looked_up = path.name not in OFFLINE
+    looked_up = not _reads_offline(lockfile)
+    unread = _keep_private_without_configs(source, root, lockfile, configs_json) or {"unknown": False, "unread": []}
+    read_configs = [c for c in json.loads(configs_for(lockfile, configs_json)) if (Path(root) / c).is_file()]
     extra_hosts = (
         _public_extra_hosts(root, lockfile, configs_json)
         if looked_up and source.kind == "requirements" and not source.pypi_only
@@ -448,6 +586,10 @@ def check(
             "listed": len(source.packages),
             "skipped": sorted({p.name for p in source.packages if p.skip}),
             "private": sorted({p.name for p in source.packages if p.skip == "private index"}),
+            "private_count": sum(p.skip == "private index" for p in source.packages),
+            "configs": read_configs,
+            "configs_unread": unread["unread"],
+            "configs_unknown": unread["unknown"],
             "extra_indexes": extra_hosts,
             "reader": source.kind,
             "looked_up": looked_up,

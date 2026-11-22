@@ -2,9 +2,9 @@
 // Everything shown from the repo or PyPI goes in with textContent, never as HTML.
 
 import {
-  PLATFORMS, PYTHONS, parseRepo, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded,
-  fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
-  gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown,
+  PLATFORMS, PYTHONS, parseRepo, inputHint, pickRequestedFile, autoPick, toQuery, fromQuery, sortPythons, freeThreaded,
+  fixFor, rowsFor, headline, cliCommand, packageCliCommand, fixPrompt, verdictText, shareText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  gapWheelFixText, withoutUnreadable, unreadableReason, privatePyprojectReason, tileText, missedText, privateText, badgeMarkdown, fixLinks,
 } from "./check-logic.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -23,9 +23,10 @@ const SHOWN = 60;
 const LAB_SHORT = { works: "builds ✓", gil: "builds, GIL on", pure: "builds, pure Python", unsupported: "unsupported here", partial: "no compiled part", broken: "builds, won't load", fails: "won't build", slow: "too slow" };
 const LAB_LOOKUPS = 120;
 
-// The tracker's build lab results for the gap rows' packages, from its own per-package files (same origin).
+// The tracker's build lab results for the gap rows' packages, from its own per-package files (same origin). Only rows
+// the driver marked as PyPI packages (`lookup`): a private index's package name never leaves the browser, here too.
 async function loadLab(result) {
-  const names = [...new Set(result.rows.filter((r) => r.gaps.length).map((r) => canonicalName(r.name)))]
+  const names = [...new Set(result.rows.filter((r) => r.gaps.length && r.lookup).map((r) => canonicalName(r.name)))]
     .filter((n) => /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n) && !(n in state.lab))
     .slice(0, LAB_LOOKUPS);
   let next = 0;
@@ -34,9 +35,14 @@ async function loadLab(result) {
       const n = names[next++];
       try {
         const r = await fetch(new URL(`../data/packages/${n}.json`, location.href));
-        state.lab[n] = r.ok ? ((await r.json()).builds ?? []) : [];
+        if (r.ok) {
+          const doc = await r.json();
+          state.lab[n] = { ok: true, builds: doc.builds ?? [], issues_url: doc.issues_url ?? null };
+        } else {
+          state.lab[n] = { ok: false, builds: [], issues_url: null };
+        }
       } catch {
-        state.lab[n] = [];
+        state.lab[n] = { ok: false, builds: [], issues_url: null };
       }
     }
   };
@@ -69,13 +75,42 @@ const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "mod
 let seq = 0;
 let wheelgapVersion = null;
 const state = {
-  repo: null, ref: null, root: null, plan: null, detected: null, lockfile: null, auto: false, pythons: [], platforms: [],
+  repo: null, ref: null, root: null, plan: null, detected: null, projectName: null, lockfile: null, auto: false, fileNotice: null, pythons: [], platforms: [],
   result: null, fixes: null, gapWheels: null, fixesDone: false, python: null, platform: null, showAll: false, truncated: false, lab: {},
+  inputError: false,
 };
 
-function status(text, error = false) {
-  $("status").textContent = text;
+function status(content, error = false) {
+  if (Array.isArray(content)) $("status").replaceChildren(...content);
+  else $("status").textContent = content;
   $("status").classList.toggle("error", error);
+}
+
+// Shown until the next check starts: the worker's start-up progress and "Ready." lines mustn't replace it.
+function showInputError(raw) {
+  state.inputError = true;
+  const hint = inputHint(raw);
+  if (hint?.kind === "package") {
+    status([
+      `${raw.trim()} looks like a package, not a repository. `,
+      el("a", { href: `../p/${encodeURIComponent(hint.name)}/` }, "See its wheel coverage"),
+      ", or ",
+      el("a", { href: "../" }, "search packages"),
+      ".",
+    ], true);
+    return;
+  }
+  if (hint?.kind === "other-host") {
+    status([
+      "This page reads public GitHub repositories only. For a GitLab or other checkout, run ",
+      el("code", { text: "uvx wheelgap" }),
+      " in it (",
+      el("a", { href: "https://github.com/wheelgap/wheelgap/blob/main/docs/getting-started.md", rel: "noopener" }, "getting started"),
+      ").",
+    ], true);
+    return;
+  }
+  status("That doesn't look like a GitHub repository. Try owner/name or a github.com URL.", true);
 }
 
 // Re-rendering replaces buttons; this puts keyboard focus back on the one with the same data-key.
@@ -97,12 +132,12 @@ worker.onmessageerror = () => workerFailed("The checker sent something the page 
 
 worker.onmessage = ({ data }) => {
   if (data.type === "progress") {
-    if (data.id === undefined || data.id === seq) status(STAGES[data.stage] || "Working…"); // not a dropped request's
+    if (data.id === undefined ? !state.inputError : data.id === seq) status(STAGES[data.stage] || "Working…"); // not a dropped request's
     return;
   }
   if (data.type === "ready") {
     wheelgapVersion = data.wheelgap;
-    if (!state.repo) status(`Ready. wheelgap ${data.wheelgap} is running in your browser.`);
+    if (!state.repo && !state.inputError) status(`Ready. wheelgap ${data.wheelgap} is running in your browser.`);
     return;
   }
   if (data.id !== undefined && data.id !== seq) return; // an answer to a request the page has moved on from
@@ -130,36 +165,44 @@ worker.onmessage = ({ data }) => {
 };
 
 function start(repo, query = null) {
+  state.inputError = false;
   state.repo = repo;
   state.query = query;
   state.result = null;
+  state.fileNotice = null;
   $("out").hidden = true;
   $("go").disabled = true;
   $("repo").value = `${repo.owner}/${repo.name}${repo.ref ? `@${repo.ref}` : ""}`;
   status(wheelgapVersion ? STAGES.tree : STAGES.python);
-  worker.postMessage({ id: ++seq, type: "load", repo });
+  worker.postMessage({ id: ++seq, type: "load", repo, file: query?.lockfile || repo.file || null });
 }
 
-function onLoaded({ plan, detected, truncated, ref, root }) {
-  Object.assign(state, { plan, detected, truncated, ref, root });
+function onLoaded({ plan, detected, truncated, ref, root, fileInTree, projectName = null }) {
+  Object.assign(state, { plan, detected, truncated, ref, root, projectName });
   const q = state.query;
-  const named = q?.lockfile && plan.lockfiles.find((l) => l.path === q.lockfile);
-  const lock = named || pickLockfile(plan.lockfiles, state.repo.dir);
-  state.auto = !named; // the page's own pick, not one a link or the visitor named
-  if (!lock) {
+  const requested = q?.lockfile || state.repo.file || null;
+  const picked = pickRequestedFile(plan.lockfiles, requested, Boolean(fileInTree), state.repo.dir);
+  plan.lockfiles = picked.lockfiles;
+  state.auto = picked.auto; // the page's own pick, not one a link or the visitor named
+  state.fileNotice = picked.notice;
+  // Set before the no-lockfile answer too: its `uvx wheelgap --deps` command uses them, never the last repo's.
+  state.pythons = sortPythons(q?.pythons?.length ? q.pythons : detected.pythons);
+  state.platforms = q?.platforms?.length ? q.platforms : detected.platforms.filter((p) => NAMES[p]);
+  if (!state.platforms.length) state.platforms = ["linux-x86_64"];
+  if (!picked.lock && !picked.choose) {
     status("");
     $("go").disabled = false;
     return noLockfile();
   }
-  state.lockfile = lock.path;
-  state.pythons = sortPythons(q?.pythons?.length ? q.pythons : detected.pythons);
-  state.platforms = q?.platforms?.length ? q.platforms : detected.platforms.filter((p) => NAMES[p]);
-  if (!state.platforms.length) state.platforms = ["linux-x86_64"];
   state.query = null;
+  if (!picked.lock) return chooseFile(picked.choose);
+  state.lockfile = picked.lock.path;
   runCheck();
 }
 
 function runCheck() {
+  // No file picked yet (chooseFile()): a platform or Python chip changes the selection, and the check waits for one.
+  if (!state.lockfile) return keepFocus(renderSetup);
   state.fixes = null;
   state.fixesDone = false;
   state.showAll = false;
@@ -180,17 +223,31 @@ function onResult(result) {
   $("go").disabled = false;
   if (result.kind === "needs-index") return needsIndex(state.lockfile);
   const reason = unreadableReason(result);
-  const rest = reason ? withoutUnreadable(state.plan.lockfiles, state.lockfile, state.auto) : null;
+  let rest = reason ? withoutUnreadable(state.plan.lockfiles, state.lockfile, state.auto) : null;
+  if (rest && privatePyprojectReason(result)) {
+    // Its index or source settings apply to the files that look packages up in its folder and below (uv reads
+    // [tool.uv] from there), so those names are as private as its own: move on only to a lockfile read offline, or a
+    // file elsewhere in the repo.
+    const dir = state.lockfile.includes("/") ? state.lockfile.slice(0, state.lockfile.lastIndexOf("/") + 1) : "";
+    rest = rest.filter((l) => l.offline || !l.path.startsWith(dir));
+    if (!rest.length) rest = null;
+  }
   if (rest) {
-    // A pyproject.toml the page picked itself, with no dependencies wheelgap can read (or none at all): the repo's
+    // A pyproject.toml the page picked itself, with no dependencies the browser can check (or none at all): the repo's
     // next file is checked instead, and "What was read" says why this one wasn't.
     state.detected.unreadable.push({ path: state.lockfile, line: null, reason });
     state.plan.lockfiles = rest;
-    state.lockfile = pickLockfile(rest, state.repo.dir).path;
+    const pick = autoPick(rest, state.repo.dir);
+    if (!pick.lock) return chooseFile(pick.choose);
+    state.lockfile = pick.lock.path;
     return runCheck();
   }
   if (result.error) {
-    status(result.kind === "source" ? `wheelgap couldn't read ${state.lockfile}: ${result.error}` : result.error, true);
+    const notice = state.fileNotice ? `${state.fileNotice} Checked ${state.lockfile} instead, and ` : "";
+    status(result.kind === "source" ? `${notice}${notice ? "w" : "W"}heelgap couldn't read ${state.lockfile}: ${result.error}` : `${notice}${result.error}`, true);
+    if (result.kind === "source" && state.projectName && state.lockfile === "pyproject.toml") {
+      showPackageFallback(state.projectName);
+    }
     return;
   }
   state.result = result;
@@ -203,10 +260,76 @@ function onResult(result) {
   $("out").hidden = false;
 }
 
+function showPackageFallback(packageName) {
+  const pythons = state.pythons?.length ? state.pythons : sortPythons(state.detected?.pythons || []);
+  const platforms = state.platforms?.length
+    ? state.platforms
+    : (state.detected?.platforms || []).filter((p) => NAMES[p]);
+  const cmd = packageCliCommand(packageName, pythons, platforms.length ? platforms : ["linux-x86_64"]);
+  $("out").hidden = false;
+  $("verdict").textContent = `No lockfile found, but this looks like the PyPI package ${packageName}.`;
+  $("verdict-detail").textContent = "wheelgap can check the published package's dependencies directly:";
+  const items = [];
+  if (cmd) {
+    items.push(
+      el("pre", {}, el("code", { text: cmd })),
+      el("button", { type: "button", class: "action", text: "Copy command", onclick: (e) => copy(e.currentTarget, cmd, "Command copied") }),
+    );
+  }
+  const trackerSlot = el("p", { class: "note" });
+  items.push(trackerSlot);
+  // A link named a file this page can't check: that comes first.
+  const notice = state.fileNotice ? [el("p", { class: "alert warn", text: state.fileNotice })] : [];
+  $("alerts").replaceChildren(...notice, ...items);
+  hideResultSections(true);
+  const canonical = canonicalName(packageName);
+  if (/^[a-z0-9]+(-[a-z0-9]+)*$/.test(canonical) && typeof fetch === "function") {
+    fetch(new URL(`../data/packages/${canonical}.json`, location.href), { method: "HEAD" })
+      .then((r) => {
+        if (r.ok && state.projectName === packageName) {
+          trackerSlot.replaceChildren(
+            "Or view ",
+            el("a", { href: `../p/${encodeURIComponent(canonical)}/` }, `${packageName} on the wheelgap tracker`),
+            ".",
+          );
+        }
+      })
+      .catch(() => {});
+  }
+}
+
+// Several requirements files under other names and nothing else to check: the page doesn't guess which one is the
+// project's (as `wheelgap DIR` doesn't), so it lists them and the picker checks the one chosen.
+function chooseFile(files) {
+  state.lockfile = null;
+  state.result = null;
+  status("");
+  $("go").disabled = false;
+  $("out").hidden = false;
+  const names = files.map((l) => l.path);
+  const some = `${names.slice(0, 8).join(", ")}${names.length > 8 ? `, and ${names.length - 8} more` : ""}`;
+  $("verdict").textContent = "Pick the file to check";
+  $("verdict-detail").textContent = names.length === 1
+    ? `${state.repo.owner}/${state.repo.name} has no lockfile the page reads by itself, only ${names[0]}, which by its name is for development, tests, docs or examples, so it isn't checked on its own. To check it anyway, pick it under "Lockfile" below.`
+    : `${state.repo.owner}/${state.repo.name} has no lockfile the page reads by itself, but ${names.length} requirements files: ${some}. Which one holds the project's dependencies can't be told from its name, so pick it under "Lockfile" below.`;
+  // A link named a file this page can't check: say so, as the verdict would after a fallback.
+  // A link named a file this page can't check: say so, as the verdict would after a fallback. And a repo that names
+  // its PyPI package (setup.cfg, pyproject.toml) can also be checked as that package.
+  const cmd = state.projectName ? packageCliCommand(state.projectName, state.pythons, state.platforms) : null;
+  $("alerts").replaceChildren(
+    ...(state.fileNotice ? [el("p", { class: "alert warn", text: `${state.fileNotice} Pick a file to check instead.` })] : []),
+    ...(cmd ? [el("p", { class: "alert" }, `Or check the published package ${state.projectName}'s dependencies: `, el("code", { text: cmd }))] : []),
+  );
+  renderSetup();
+  hideResultSections(true, true);
+}
+
 function noLockfile() {
+  if (state.projectName) return showPackageFallback(state.projectName);
   $("out").hidden = false;
   $("verdict").textContent = "No lockfile found";
-  $("verdict-detail").textContent = `The repo check reads a uv.lock, poetry.lock, pdm.lock, pylock.toml, Pipfile.lock, requirements.txt, pixi.lock or pyproject.toml, and ${state.repo.owner}/${state.repo.name} has none${state.truncated ? " in the part of its file list GitHub returned" : ""}. Run uvx wheelgap in a checkout for anything else.`;
+  const prefix = state.fileNotice ? `${state.fileNotice} ` : "";
+  $("verdict-detail").textContent = `${prefix}The repo check reads a uv.lock, poetry.lock, pdm.lock, pylock.toml, Pipfile.lock, requirements.txt, pixi.lock or pyproject.toml, and ${state.repo.owner}/${state.repo.name} has none${state.truncated ? " in the part of its file list GitHub returned" : ""}.`;
   for (const id of ["alerts"]) $(id).replaceChildren();
   hideResultSections(true);
 }
@@ -217,7 +340,7 @@ function needsIndex(path) {
   status("");
   $("verdict").textContent = `${path.split("/").pop()} needs PyPI lookups`;
   $("verdict-detail").textContent = `It doesn't list each package's files, so the browser check can't read it offline. Run uvx wheelgap ${path} in a checkout instead.`;
-  $("alerts").replaceChildren();
+  $("alerts").replaceChildren(...(state.fileNotice ? [el("p", { class: "alert warn", text: `${state.fileNotice} Checked ${path} instead.` })] : []));
   renderSetup();
   hideResultSections(true, true);
 }
@@ -225,6 +348,7 @@ function needsIndex(path) {
 function hideResultSections(hidden, keepSetup = false) {
   if (hidden) {
     $("next").hidden = true;
+    $("verdict-badge").hidden = true;
     $("verdict").closest("section").classList.remove("clean");
   }
   for (const id of ["targets-title", "gaps-title", "next-title"]) $(id).closest("section").hidden = hidden;
@@ -246,10 +370,15 @@ function render() {
 function renderVerdict() {
   const r = state.result;
   const h = headline(r);
+  const privateReason = privatePyprojectReason(r);
   const card = $("verdict").closest("section");
   const repoName = `${state.repo.owner}/${state.repo.name}`;
-  card.classList.toggle("clean", h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0);
-  $("verdict").textContent = h.targets === 0 ? `${repoName}'s lockfile leaves out every Python picked` : verdictText(h);
+  const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
+  card.classList.toggle("clean", isClean);
+  // Not offered while a private index's packages went unchecked: "keep it that way" would claim a pass for them too.
+  $("verdict-badge").hidden = !isClean || (r.private || []).length > 0;
+  $("verdict").textContent = privateReason ? `${r.lockfile} wasn't checked: ${privateReason}`
+    : h.targets === 0 ? `${repoName}'s lockfile leaves out every Python picked` : verdictText(h);
   const steps = nextSteps(state.pythons, state.platforms);
   $("next").hidden = !steps.length;
   $("next-buttons").replaceChildren(...steps.map((s) => el("button", {
@@ -258,6 +387,9 @@ function renderVerdict() {
   })));
   $("verdict-detail").textContent = `${repoName} · ${r.lockfile}${state.ref && state.ref !== "HEAD" ? ` at ${state.ref}` : ""} · Python ${sortPythons(state.pythons).join(", ")} on ${state.platforms.length} platform${state.platforms.length === 1 ? "" : "s"}`;
   const alerts = [];
+  if (state.fileNotice) {
+    alerts.push(el("p", { class: "alert warn", text: `${state.fileNotice} Checked ${r.lockfile} instead.` }));
+  }
   if (r.outside_lock.length) {
     alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} only allows Python ${r.requires_python}, so it has no wheels for ${r.outside_lock.join(", ")} and those aren't counted. Widening requires-python and re-locking is the first step there.` }));
   }
@@ -274,19 +406,20 @@ function renderVerdict() {
     alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} also installs from ${host} (--extra-index-url). This page checked PyPI only.${why}` }));
   }
   const privateIndex = r.private || [];
-  // The CLI looks a requirements file's or a pyproject.toml's packages up on PyPI whatever index it names (an
-  // --index-url alone isn't the same install as an --extra-index-url); a lock that pins a package to another index
-  // (Pipfile.lock, pixi.lock) is skipped there too, unless --index-url names that index.
-  const lookedUpByCli = r.reader === "requirements" || r.reader === "pyproject";
-  if (privateIndex.length) {
-    alerts.push(el("p", { class: "alert warn", text: `Not checked: ${r.lockfile} names an index or source other than PyPI (an --index-url or --extra-index-url line, a [tool.uv] index or sources setting, a Pipfile source), so these may not be PyPI's packages and their names aren't sent to pypi.org: ${some(privateIndex)}. ${lookedUpByCli ? `uvx wheelgap ${r.lockfile} in a checkout checks them on PyPI's files.` : "To check them on that index, run uvx wheelgap --index-url with its URL in a checkout."}` }));
+  if (privateReason) {
+    // The zero-package result hides "Fix it", so keep the local command here with the explanation.
+    alerts.push(el("p", { class: "alert warn" },
+      "Check locally with ", el("code", { text: cliCommand(r, state.pythons, state.platforms) }),
+      " in a checkout (add --index-url for your index), or commit a uv.lock: this page reads its recorded files without PyPI lookups."));
+  } else if (privateIndex.length) {
+    alerts.push(el("p", { class: "alert warn", text: privateText(r) }));
   }
   const skipped = r.skipped.filter((name) => !privateIndex.includes(name));
   if (skipped.length) {
     alerts.push(el("p", { class: "alert", text: `Not checked, since they aren't from PyPI (the project itself, or path, Git and workspace packages): ${some(skipped)}.` }));
   }
   const base = r.lockfile.split("/").pop();
-  if (r.looked_up && (base === "pyproject.toml" || base.startsWith("requirements"))) {
+  if (!privateReason && r.looked_up && (base === "pyproject.toml" || base.startsWith("requirements"))) {
     alerts.push(el("p", { class: "alert", text: `${r.lockfile} is checked for its direct requirements, as uvx wheelgap ${r.lockfile} does; uvx wheelgap --deps ${r.lockfile} on the command line checks the whole dependency tree.` }));
   }
   $("alerts").replaceChildren(...alerts);
@@ -329,14 +462,17 @@ function renderSetup() {
   }
 
   const locks = state.plan.lockfiles;
-  $("lock-pick").hidden = locks.length < 2;
-  $("lockfile").replaceChildren(...locks.map((l) => el("option", { value: l.path, selected: l.path === state.lockfile, text: l.offline ? l.path : `${l.path} (looks packages up on PyPI)` })));
-  $("lockfile").onchange = () => { state.lockfile = $("lockfile").value; state.auto = false; runCheck(); };
+  $("lock-pick").hidden = locks.length < 2 && Boolean(state.lockfile); // a chooser has a picker, even for one file
+  $("lockfile").replaceChildren(
+    ...(state.lockfile ? [] : [el("option", { value: "", disabled: true, selected: true, text: "Choose a file…" })]),
+    ...locks.map((l) => el("option", { value: l.path, selected: l.path === state.lockfile, text: l.offline ? l.path : `${l.path} (looks packages up on PyPI)` })),
+  );
+  $("lockfile").onchange = () => { state.lockfile = $("lockfile").value; state.auto = false; state.fileNotice = null; runCheck(); };
 
   const repoUrl = `https://github.com/${state.repo.owner}/${state.repo.name}/blob/${encodeURIComponent(state.ref || "HEAD")}/`;
   const link = (path, line) => el("a", { href: `${repoUrl}${path.split("/").map(encodeURIComponent).join("/")}${line ? `#L${line}` : ""}`, rel: "noopener" }, el("code", { text: `${path}${line ? `:${line}` : ""}` }));
   const items = [
-    el("li", {}, "Lockfile: ", link(state.lockfile)),
+    state.lockfile ? el("li", {}, "Lockfile: ", link(state.lockfile)) : el("li", { text: "Lockfile: none picked yet." }),
     ...d.found.map((f) => el("li", {}, `${f.kind === "target" ? "Platform" : "Python"} ${f.value}, from `, link(f.path, f.line), ` (${f.source})`)),
     ...d.unreadable.map((u) => el("li", {}, "Not read: ", link(u.path, u.line), ` (${u.reason})`)),
   ];
@@ -387,7 +523,7 @@ function renderTable() {
     : rows.length
       ? `${rows.length} package${rows.length === 1 ? "" : "s"}. The fix column names the lowest newer release with a wheel for every gap that has one, without losing a wheel elsewhere.`
       : "None: every package installs from a wheel here.";
-  const shownLab = rows.some((row) => labels.some((t) => row.statuses[t.label] === "source" && labFor(state.lab[canonicalName(row.name)], row.version, t.label)));
+  const shownLab = rows.some((row) => labels.some((t) => row.statuses[t.label] === "source" && labFor(state.lab[canonicalName(row.name)]?.builds, row.version, t.label)));
   if (shownLab) {
     $("gaps-note").textContent += " Under a source build, what the tracker's build lab saw building that release from source on GitHub's runners, which have compilers and many system libraries preinstalled (hover for details).";
   }
@@ -401,12 +537,42 @@ function renderTable() {
     const gapWheelFix = f.kind === "none" || f.kind === "loses" ? gapWheelFixText(row, state.gapWheels) : null;
     // An unknown-only row can say why (a package an extra index may serve instead of PyPI's).
     const fixText = gapWheelFix ?? (f.kind === "pending" ? (state.fixesDone ? "not looked up" : "…") : f.kind === "unchecked" && row.reason ? row.reason : FIX_TEXT[f.kind](f));
+    const name = canonicalName(row.name);
+    const labPkg = state.lab[name];
+    const hasTracker = Boolean(labPkg?.ok && row.lookup !== false && f.kind !== "private" && f.kind !== "pending");
+    const pypiUrl = `https://pypi.org/project/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version || "")}`;
+
+    const pkgKids = [];
+    if (hasTracker) {
+      pkgKids.push(
+        el("a", { href: `../p/${name}/`, text: row.name }),
+        el("span", { class: "ver", text: row.version || "" }),
+        el("a", { class: "pypi", href: pypiUrl, rel: "noopener", text: "PyPI" })
+      );
+    } else if (row.lookup === false || f.kind === "private" || f.kind === "pending") {
+      pkgKids.push(
+        el("span", { text: row.name }),
+        el("span", { class: "ver", text: row.version || "" })
+      );
+    } else {
+      pkgKids.push(
+        el("a", { href: pypiUrl, rel: "noopener", text: row.name }),
+        el("span", { class: "ver", text: row.version || "" })
+      );
+    }
+
+    const links = fixLinks(row, f, labPkg, state.gapWheels);
+    const fixKids = [el("span", { text: fixText })];
+    for (const link of links) {
+      fixKids.push(el("span", { class: "fix-link" }, el("a", { href: link.href, rel: link.rel || "noopener", text: link.text })));
+    }
+
     return el("tr", {},
-      el("td", { class: "pkg" }, el("a", { href: `https://pypi.org/project/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version || "")}`, rel: "noopener", text: row.name }), el("span", { class: "ver", text: row.version || "" })),
+      el("td", { class: "pkg" }, ...pkgKids),
       ...labels.map((t) => {
         const s = row.statuses[t.label];
         if (s === "n/a") return el("td", {}, el("span", { class: "na", text: "–", title: "not installed on this target" }));
-        const lab = s === "source" ? labFor(state.lab[canonicalName(row.name)], row.version, t.label) : null;
+        const lab = s === "source" ? labFor(labPkg?.builds, row.version, t.label) : null;
         const v = lab ? labVerdict(lab) : null;
         return el("td", {}, el("span", { class: `status s-${s}`, text: STATUS_TEXT[s] || s }),
           v ? el("span", { class: `lab lab-${v.kind}`, text: LAB_SHORT[v.kind], title: `Build lab, ${lab.date} on ${lab.runner}: ${v.text}` }) : null,
@@ -414,7 +580,7 @@ function renderTable() {
             ? el("span", { class: "lab", text: "gap wheel", title: state.gapWheels.unofficial })
             : null);
       }),
-      el("td", { class: `fix fix-${f.kind}`, text: fixText }));
+      el("td", { class: `fix fix-${f.kind}` }, ...fixKids));
   }));
   $("gap-table").replaceChildren(head, body);
   $("gap-table").hidden = !rows.length;
@@ -424,9 +590,14 @@ function renderTable() {
 
 function renderNext() {
   const r = state.result;
+  const h = headline(r);
+  const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
+  $("next-title").textContent = isClean && !(r.private || []).length ? "Keep it green" : "Fix it";
+  $("copy-prompt").hidden = isClean;
+  $("prompt-note").hidden = isClean;
   $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
   // The link names the lockfile only when a visit with the repo alone would start from another one.
-  $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, pickLockfile(state.plan.lockfiles, null)?.path ?? null);
+  $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, autoPick(state.plan.lockfiles.filter((l) => !l.added), null).lock?.path ?? null);
   const caveats = [
     "A wheel on PyPI means pip and uv install it without compiling; it doesn't test that the package works there.",
     r.looked_up
@@ -452,8 +623,13 @@ async function copy(button, text, done) {
 }
 
 $("copy-link").onclick = (e) => copy(e.currentTarget, location.href, "Link copied");
-$("copy-prompt").onclick = (e) => copy(e.currentTarget, fixPrompt(`${state.repo.owner}/${state.repo.name}`, state.result, state.fixes, state.pythons, state.platforms, state.gapWheels), "Prompt copied");
+// The line names only what the shown result counted: its own targets, less the Pythons the lockfile leaves out,
+// never the current selection (a new check may still be running for it), and how many it left off pypi.org.
+const counted = (key) => [...new Set(state.result.targets.filter((t) => !state.result.outside_lock.includes(t.python)).map((t) => t[key]))];
+$("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), counted("python"), counted("platform"), location.href, (state.result.private || []).length), "Result copied");
+$("copy-prompt").onclick = (e) => copy(e.currentTarget, fixPrompt(`${state.repo.owner}/${state.repo.name}`, state.result, state.fixes, state.pythons, state.platforms, state.gapWheels, state.lab), "Prompt copied");
 $("copy-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
+$("copy-verdict-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
 $("copy-gap-wheels").onclick = (e) => copy(e.currentTarget, state.gapWheels.text, "Gap wheel instructions copied");
 $("more").onclick = () => { state.showAll = true; renderTable(); };
 
@@ -464,9 +640,12 @@ $("form").addEventListener("submit", (e) => {
   const at = text.match(/^([^\s@]+\/[^\s@]+)@([A-Za-z0-9._\/-]+)$/); // owner/name@ref
   if (at) [, text, ref] = at;
   const repo = parseRepo(text);
-  if (!repo) return status("That doesn't look like a GitHub repository. Try owner/name or a github.com URL.", true);
+  if (!repo) return showInputError(text);
   if (ref) {
-    if (!validRef(ref)) return status("That branch or tag name isn't one this page can read.", true);
+    if (!validRef(ref)) {
+      state.inputError = true; // like showInputError(): start-up progress mustn't replace it
+      return status("That branch or tag name isn't one this page can read.", true);
+    }
     repo.ref = ref;
   }
   start(repo);
@@ -475,3 +654,10 @@ for (const b of document.querySelectorAll("[data-repo]")) b.addEventListener("cl
 
 const initial = fromQuery(location.search);
 if (initial) start(initial.repo, initial);
+else {
+  const rawRepo = new URLSearchParams(location.search).get("repo");
+  if (rawRepo) {
+    $("repo").value = rawRepo;
+    showInputError(rawRepo);
+  }
+}

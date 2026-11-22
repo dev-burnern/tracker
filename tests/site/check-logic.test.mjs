@@ -2,9 +2,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
-  cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
-  gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
+  parseRepo, inputHint, rawUrl, pickLockfile, autoPick, isSideFile, pickRequestedFile, isReadableFile, fileKind, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  cliCommand, packageCliCommand, projectNameFromMetadata, metadataFiles, fixPrompt, verdictText, shareText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, privateText, badgeMarkdown, trimProject, trimReleases,
+  fixLinks, validIssuesUrl,
 } from "../../site/check/check-logic.mjs";
 
 test("PyPI trimming keeps the pinned consumer's fields without changing the input", () => {
@@ -52,20 +53,125 @@ test("trimming preserves malformed and missing shapes instead of inventing empty
 });
 
 test("parseRepo reads the forms people paste", () => {
-  const plain = { owner: "fastapi", name: "fastapi", ref: null, dir: null };
+  const plain = { owner: "fastapi", name: "fastapi", ref: null, dir: null, file: null };
   assert.deepEqual(parseRepo("fastapi/fastapi"), plain);
   assert.deepEqual(parseRepo("https://github.com/fastapi/fastapi"), plain);
   assert.deepEqual(parseRepo("github.com/fastapi/fastapi.git/"), plain);
   assert.deepEqual(parseRepo("git@github.com:fastapi/fastapi.git"), plain);
   assert.deepEqual(parseRepo("https://www.github.com/fastapi/fastapi?tab=readme#top"), plain);
-  assert.deepEqual(parseRepo("https://github.com/o/r/tree/dev/backend/api"), { owner: "o", name: "r", ref: "dev", dir: "backend/api" });
-  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"), { owner: "o", name: "r", ref: "main", dir: "backend" });
-  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/uv.lock"), { owner: "o", name: "r", ref: "main", dir: null });
+  assert.deepEqual(parseRepo("https://github.com/o/r/tree/dev/backend/api"), { owner: "o", name: "r", ref: "dev", dir: "backend/api", file: null });
+  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"), { owner: "o", name: "r", ref: "main", dir: "backend", file: "backend/uv.lock" });
+  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/uv.lock"), { owner: "o", name: "r", ref: "main", dir: null, file: "uv.lock" });
+  assert.deepEqual(
+    parseRepo("https://github.com/celery/celery/blob/main/requirements/default.txt"),
+    { owner: "celery", name: "celery", ref: "main", dir: "requirements", file: "requirements/default.txt" },
+  );
+  assert.deepEqual(
+    parseRepo("https://github.com/o/r/blob/main/my%20dir/my%20reqs.txt"),
+    { owner: "o", name: "r", ref: "main", dir: "my dir", file: "my dir/my reqs.txt" },
+  );
 });
 
 test("parseRepo refuses what isn't a repo", () => {
   for (const bad of ["", "fastapi", "https://gitlab.com/a", "a b/c", "../x", "o/..", "o/r/tree/main/../../etc", "javascript:alert(1)", "o/r/tree/ma in/x"]) {
     assert.equal(parseRepo(bad), null, bad);
+  }
+});
+
+test("pickRequestedFile checks a named file, adds a readable one from the tree, or says why it fell back", () => {
+  const locks = [{ path: "pyproject.toml", offline: false }, { path: "uv.lock", offline: true }];
+  assert.deepEqual(pickRequestedFile(locks, null, false, null), { lock: locks[0], lockfiles: locks, auto: true, notice: null, choose: null });
+  assert.deepEqual(pickRequestedFile(locks, "uv.lock", true, null), { lock: locks[1], lockfiles: locks, auto: false, notice: null, choose: null });
+  const added = pickRequestedFile(locks, "requirements/default.txt", true, null);
+  assert.deepEqual(added.lock, { path: "requirements/default.txt", offline: false, added: true });
+  assert.deepEqual(added.lockfiles.map((l) => l.path), ["pyproject.toml", "uv.lock", "requirements/default.txt"]);
+  assert.equal(added.auto, false);
+  assert.deepEqual(pickRequestedFile(locks, "tests/poetry.lock", true, null).lock, { path: "tests/poetry.lock", offline: true, added: true });
+  // The only checkable file being one the link named: the badge's default must still come from the repo's own list.
+  const only = pickRequestedFile([], "requirements/base.txt", true, null);
+  assert.equal(only.lock.path, "requirements/base.txt");
+  assert.equal(pickLockfile(only.lockfiles.filter((l) => !l.added), null), null);
+  assert.equal(isReadableFile("REQS.TXT"), false);
+  const missing = pickRequestedFile(locks, "requirements/gone.txt", false, null);
+  assert.equal(missing.lock, locks[0]);
+  assert.equal(missing.auto, true);
+  assert.equal(missing.notice, "requirements/gone.txt wasn't found in this repository.");
+  assert.equal(pickRequestedFile(locks, "setup.cfg", true, null).notice, "setup.cfg isn't a file this page reads.");
+  assert.deepEqual(pickRequestedFile([], "setup.cfg", true, null), { lock: null, lockfiles: [], auto: true, notice: "setup.cfg isn't a file this page reads.", choose: null });
+  for (const yes of ["uv.lock", "a/Pipfile.lock", "pixi.lock", "pylock.dev.toml", "uv-py312.lock", "requirements-dev.lock", "x/reqs.in", "pyproject.toml"]) {
+    assert.equal(isReadableFile(yes), true, yes);
+  }
+  // script.py.lock: the pinned wheelgap 0.13.0 doesn't read a script's lock ("don't know how to read"), so it's
+  // refused here with the fallback, never checked and reported as unreadable.
+  for (const no of ["setup.cfg", "README.md", "setup.py", "Cargo.lock", "script.py.lock", "report.json", "pipfile.lock"]) {
+    assert.equal(isReadableFile(no), false, no);
+  }
+  assert.equal(pickRequestedFile(locks, "scripts/tool.py.lock", true, null).notice, "scripts/tool.py.lock isn't a file this page reads.");
+});
+
+test("pickRequestedFile's own pick is autoPick()'s: several requirements files under other names are asked about", () => {
+  const other = (path) => ({ path, offline: false, other: true });
+  const several = [other("requirements/base.txt"), other("requirements/docs.txt")];
+  // No file named, and a named file the page can't check: no guess, the files to ask between, and the notice.
+  assert.deepEqual(pickRequestedFile(several, null, false, null), { lock: null, lockfiles: several, auto: true, notice: null, choose: several });
+  assert.deepEqual(pickRequestedFile(several, "README.md", true, null), { lock: null, lockfiles: several, auto: true, notice: "README.md isn't a file this page reads.", choose: several });
+  assert.deepEqual(pickRequestedFile([other("requirements-dev.txt")], null, false, null).choose, [other("requirements-dev.txt")]);
+  // A named one is checked, listed or added.
+  assert.equal(pickRequestedFile(several, "requirements/docs.txt", false, null).choose, null);
+  assert.equal(pickRequestedFile(several, "requirements/docs.txt", false, null).lock.path, "requirements/docs.txt");
+  const added = pickRequestedFile(several, "deps/prod.txt", true, null);
+  assert.deepEqual([added.lock.path, added.choose], ["deps/prod.txt", null]);
+});
+
+test("a named file is checked offline exactly when wheelgap reads it as a lockfile that lists its files", () => {
+  // As sources.file_kind in wheelgap 0.13.0, and driver.py's OFFLINE_KINDS: by the reader its name picks, not by an
+  // exact name, so a pylock.dev.toml or uv-py312.lock isn't read as a lookups file (its left-out Pythons would show
+  // false gaps), and a requirements-dev.lock is still looked up.
+  const kinds = {
+    "uv.lock": "uv", "a/pylock.toml": "pylock", "poetry.lock": "poetry", "pdm.lock": "pdm", "Pipfile.lock": "pipfile",
+    "pixi.lock": "pixi", "pyproject.toml": "pyproject", "pylock.dev.toml": "pylock", "uv-py312.lock": "uv",
+    "requirements-dev.lock": "requirements", "requirements.uv.lock": "requirements", "x/dev.txt": "requirements",
+    "reqs.in": "requirements", "script.py.lock": null, "REQS.TXT": null, "report.json": null,
+  };
+  for (const [path, kind] of Object.entries(kinds)) assert.equal(fileKind(path), kind, path);
+  const offline = (path) => pickRequestedFile([], path, true, null).lock.offline;
+  for (const path of ["pylock.dev.toml", "envs/uv-py312.lock", "tests/poetry.lock", "examples/pdm.lock"]) assert.equal(offline(path), true, path);
+  for (const path of ["requirements-dev.lock", "requirements.uv.lock", "a/Pipfile.lock", "b/pixi.lock", "c/pyproject.toml", "reqs.in"]) {
+    assert.equal(offline(path), false, path);
+  }
+});
+
+test("inputHint identifies package names and non-GitHub hosts, and ignores everything else", () => {
+  assert.deepEqual(inputHint("numpy"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("Pillow"), { kind: "package", name: "pillow" });
+  assert.deepEqual(inputHint("ruamel.yaml"), { kind: "package", name: "ruamel-yaml" });
+  assert.deepEqual(inputHint("https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("https://codeberg.org/owner/project"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("git@gitlab.com:owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("ssh://git@gitlab.com/owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("git+https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  // A bare domain is a host, not a package called gitlab-com.
+  assert.deepEqual(inputHint("gitlab.com"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("codeberg.org"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("zope.interface"), { kind: "package", name: "zope-interface" });
+  assert.deepEqual(inputHint("jaraco.net"), { kind: "package", name: "jaraco-net" });
+  assert.deepEqual(inputHint("https://pypi.org/project/NumPy/"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("pypi.org/project/ruamel.yaml/0.18.6/"), { kind: "package", name: "ruamel-yaml" });
+  // Every input that gets a hint is one parseRepo() rejects, or the page would check it as a GitHub repo instead.
+  for (const hinted of [
+    "numpy", "gitlab.com/owner/project", "codeberg.org/owner/project", "bitbucket.org/o/r", "gitlab.com/owner",
+    "https://gitlab.com/owner/project", "git@gitlab.com:owner/project.git", "pypi.org/project/numpy", "https://pypi.org/project/numpy/",
+  ]) {
+    assert.ok(inputHint(hinted), hinted);
+    assert.equal(parseRepo(hinted), null, hinted);
+  }
+  // GitHub's own hosts get the default message, not "GitHub repositories only".
+  for (const none of [
+    "owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2", "github.com", "www.github.com",
+    "https://raw.githubusercontent.com/o/r/main/uv.lock", "https://api.github.com/repos/o/r", "https://gist.github.com/u/1",
+  ]) {
+    assert.equal(inputHint(none), null, none);
   }
 });
 
@@ -101,6 +207,43 @@ test("an unreadable pyproject.toml the page picked itself gives way to the repo'
   assert.equal(withoutUnreadable([locks[0]], "pyproject.toml", true), null); // nothing else to check
   const nested = [{ path: "a/pyproject.toml", offline: false }, { path: "a/b/pyproject.toml", offline: false }];
   assert.deepEqual(withoutUnreadable(nested, "a/pyproject.toml", true), [nested[1]]);
+  // Celery-style repo: an auto-picked pyproject.toml with no [project] table moves on to its requirements files, and
+  // with several of those the page asks which one (autoPick), as `wheelgap DIR` lists them: none is picked by name.
+  const celery = [
+    { path: "pyproject.toml", offline: false },
+    { path: "requirements/default.txt", offline: false, other: true },
+    { path: "requirements/docs.txt", offline: false, other: true },
+  ];
+  const rest = withoutUnreadable(celery, "pyproject.toml", true);
+  assert.deepEqual(autoPick(rest, null), { lock: null, choose: rest });
+});
+
+test("autoPick keeps the exactly-named files' pick, checks a lone other requirements file, and asks between several", () => {
+  const other = (path) => ({ path, offline: false, other: true });
+  const named = [{ path: "pyproject.toml", offline: false }, { path: "backend/uv.lock", offline: true }];
+  // Exactly-named files decide as pickLockfile() does, wherever the others are (they come last in plan() anyway).
+  assert.equal(autoPick([...named, other("requirements-dev.txt")], null).lock.path, "pyproject.toml");
+  assert.equal(autoPick([named[1], other("requirements-dev.txt")], null).lock.path, "backend/uv.lock");
+  assert.equal(autoPick([...named, other("backend/requirements-prod.txt")], "backend").lock.path, "backend/uv.lock");
+  assert.equal(autoPick([other("requirements/base.txt")], null).lock.path, "requirements/base.txt");
+  // Several: none, whatever their names or the folder a URL named.
+  const several = [other("requirements/base.txt"), other("requirements/docs.txt"), other("requirements/local.txt")];
+  assert.deepEqual(autoPick(several, null), { lock: null, choose: several });
+  assert.deepEqual(autoPick(several, "requirements"), { lock: null, choose: several });
+  assert.deepEqual(autoPick([], null), { lock: null, choose: null });
+});
+
+test("a lone requirements file named for development, tests, docs or examples is offered, never checked on its own", () => {
+  // As `wheelgap DIR` on main (_is_side): it lists such a file and never checks it by itself.
+  const other = (path) => ({ path, offline: false, other: true });
+  for (const path of ["requirements-dev.txt", "requirements/test.txt", "requirements_docs.txt", "requirements/ci.txt", "examples/requirements-prod.txt", "requirements-Typing.txt"]) {
+    assert.deepEqual(autoPick([other(path)], null), { lock: null, choose: [other(path)] }, path);
+  }
+  for (const path of ["requirements/base.txt", "requirements-prod.txt", "requirements/local.txt", "requirements-devices.txt", "requirements/latest.txt"]) {
+    assert.equal(autoPick([other(path)], null).lock?.path, path, path);
+  }
+  assert.equal(isSideFile("requirements-dev.txt"), true);
+  assert.equal(isSideFile("requirements/base.txt"), false);
 });
 
 test("a file with nothing to check is no answer; one whose packages were skipped or aren't installed is", () => {
@@ -117,14 +260,51 @@ test("a file with nothing to check is no answer; one whose packages were skipped
   assert.equal(unreadableReason({ kind: "needs-index", error: "poetry.lock needs the index" }), null);
 });
 
+test("an all-private pyproject gives way only when automatically picked and another file remains", () => {
+  const result = { lockfile: "pyproject.toml", looked_up: true, listed: 3, packages: 0,
+    private: ["fastapi", "mylib", "numpy"], private_count: 3, skipped: ["fastapi", "mylib", "numpy"] };
+  const reason = "its index or source settings don't identify which packages are from PyPI";
+  const locks = [{ path: result.lockfile }, { path: "backend/uv.lock" }];
+  assert.equal(unreadableReason(result), reason);
+  assert.deepEqual(withoutUnreadable(locks, result.lockfile, true), [locks[1]]);
+  assert.equal(withoutUnreadable(locks, result.lockfile, false), null);
+  assert.equal(withoutUnreadable([locks[0]], result.lockfile, true), null);
+  // Repeated names with different markers are separate entries, but the display names are deduplicated.
+  assert.equal(unreadableReason({ ...result, listed: 2, private_count: 2, private: ["numpy"] }), reason);
+  // Kept private because settings files that apply to it couldn't all be read: the reason says that instead.
+  assert.equal(unreadableReason({ ...result, configs_unread: ["uv.toml"] }), "installer settings that apply to it couldn't be read here (uv.toml)");
+  assert.equal(unreadableReason({ ...result, configs_unknown: true }), "GitHub listed only part of the repo's files, so installer settings that apply to it may be missing");
+  assert.equal(unreadableReason({ ...result, configs: ["pyproject.toml"], configs_unread: [] }), reason);
+  for (const change of [
+    { packages: 1, private_count: 2 }, // some packages were checked
+    { private_count: 2 }, // another package was skipped for a different reason, or excluded by markers
+    { listed: 2, private_count: 0, private: [] }, // all marker-excluded
+    { listed: 0, private_count: 0, looked_up: false }, // empty offline lock
+    { private_count: undefined }, // no exact count from an older driver
+    { error: "unreadable" },
+    { lockfile: "requirements.txt" },
+  ]) assert.equal(unreadableReason({ ...result, ...change }), null, JSON.stringify(change));
+});
+
 test("a result's query round-trips, and unknown values are dropped", () => {
   const state = { repo: { owner: "o", name: "r", ref: "dev" }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] };
   const q = toQuery(state);
   assert.equal(q, "repo=o/r&ref=dev&lock=backend/uv.lock&py=3.14,3.14t&t=linux-aarch64,win-arm64");
   const back = fromQuery(`?${q}`);
-  assert.deepEqual(back, { repo: { owner: "o", name: "r", ref: "dev", dir: null }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] });
+  assert.deepEqual(back, { repo: { owner: "o", name: "r", ref: "dev", dir: null, file: null }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] });
+  const reqQuery = toQuery({ repo: { owner: "celery", name: "celery", ref: "main" }, lockfile: "requirements/default.txt", pythons: ["3.13"], platforms: ["linux-x86_64"] });
+  assert.equal(reqQuery, "repo=celery/celery&ref=main&lock=requirements/default.txt&py=3.13&t=linux-x86_64");
+  assert.deepEqual(fromQuery(`?${reqQuery}`), {
+    repo: { owner: "celery", name: "celery", ref: "main", dir: null, file: null },
+    lockfile: "requirements/default.txt",
+    pythons: ["3.13"],
+    platforms: ["linux-x86_64"],
+  });
   const odd = fromQuery("?repo=o/r&lock=../x&py=3.14,2.7,evil&t=linux-x86_64,amiga");
   assert.equal(odd.lockfile, null);
+  for (const bad of ["/x/requirements.txt", "a//b.txt", "./uv.lock", "a/./uv.lock"]) {
+    assert.equal(fromQuery(`?repo=o/r&lock=${encodeURIComponent(bad)}`).lockfile, null, bad);
+  }
   assert.deepEqual(odd.pythons, ["3.14"]);
   assert.deepEqual(odd.platforms, ["linux-x86_64"]);
   assert.equal(fromQuery("?repo=nope"), null);
@@ -147,7 +327,7 @@ test("the badge Markdown links the check of the repo alone, and names the lockfi
   const url = md.slice(badge.length + 1, -1);
   assert.doesNotMatch(url, /[\s()[\]<>"']/);
   // The page reads the link back as the same repo and file, with nothing else picked.
-  assert.deepEqual(fromQuery(new URL(url).search), { repo: { owner: "o", name: "r", ref: null, dir: null }, lockfile: odd, pythons: [], platforms: [] });
+  assert.deepEqual(fromQuery(new URL(url).search), { repo: { owner: "o", name: "r", ref: null, dir: null, file: null }, lockfile: odd, pythons: [], platforms: [] });
 });
 
 test("Pythons sort with each free-threaded build after its own", () => {
@@ -193,6 +373,69 @@ test("rowsFor lists one Python's gaps, most first; headline counts distinct pack
 test("the CLI command and the fix prompt reproduce the check", () => {
   assert.equal(cliCommand(result, ["3.14t", "3.14"], ["linux-x86_64", "win-arm64"]), "uvx wheelgap uv.lock -p 3.14,3.14t -t linux-x86_64,win-arm64");
   assert.equal(cliCommand({ lockfile: "my app/uv.lock" }, ["3.14"], ["linux-x86_64"]), "uvx wheelgap 'my app/uv.lock' -p 3.14 -t linux-x86_64");
+  assert.equal(packageCliCommand("httpie", ["3.14", "3.13"], ["linux-x86_64", "win-arm64"]), "uvx wheelgap --deps httpie -p 3.13,3.14 -t linux-x86_64,win-arm64");
+  assert.equal(packageCliCommand("httpie; rm -rf /", ["3.14"], ["linux-x86_64"]), null);
+});
+
+test("projectNameFromMetadata reads plain names from setup.cfg and pyproject.toml and rejects dynamic or invalid ones", () => {
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = httpie\nversion = 3.2.4\n"), "httpie");
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = attr: pkg.__name__\n"), null);
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = file: NAME.txt\n"), null);
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = bad name!\n"), null);
+  assert.equal(projectNameFromMetadata("setup.cfg", "[options]\nname = wrong-section\n"), null);
+  assert.equal(projectNameFromMetadata("pyproject.toml", '[project]\nname = "x"\ndynamic = ["dependencies"]\n'), "x");
+  assert.equal(projectNameFromMetadata("pyproject.toml", "[project]\nname = 'my_pkg'\n"), "my_pkg");
+  assert.equal(projectNameFromMetadata("pyproject.toml", '[tool.ruff]\nname = "nope"\n'), null);
+  assert.equal(projectNameFromMetadata("setup.py", 'setup(name="ignored")\n'), null);
+});
+
+test("projectNameFromMetadata reads a setup.cfg as configparser does and a pyproject.toml's headers as TOML does", () => {
+  const cfg = (text) => projectNameFromMetadata("setup.cfg", text);
+  assert.equal(cfg("[metadata]\nName: httpie\n"), "httpie"); // keys are case-insensitive; ":" works like "="
+  assert.equal(cfg("[metadata] # comment\nname = httpie\n"), "httpie");
+  assert.equal(cfg("[metadata]\n  name = httpie\n"), "httpie"); // an indented first key is still a key
+  // Section names are case-sensitive, and an indented line after a key continues that key's value.
+  assert.equal(cfg("[METADATA]\nname = httpie\n"), null);
+  assert.equal(cfg("[ metadata ]\nname = httpie\n"), null);
+  assert.equal(cfg("[metadata]\ndescription = a tool\n  name = other\n"), null);
+  assert.equal(cfg("[metadata]\nname = httpie # inline comments aren't stripped\n"), null);
+  assert.equal(cfg("[metadata]\nname =\n  httpie\n"), null);
+  const toml = (text) => projectNameFromMetadata("pyproject.toml", text);
+  assert.equal(toml('[project] # the package\nname = "httpie"\n'), "httpie");
+  assert.equal(toml('[ project ]\nname = "httpie"\n'), "httpie");
+  // A name under any other table, an array of tables included, is never [project]'s.
+  assert.equal(toml('[build-system]\nrequires = ["setuptools"]\n[[tool.uv.index]] # torch\nname = "pytorch"\n'), null);
+  assert.equal(toml('[project]\nversion = "1"\n[tool.x] # c\nname = "nope"\n'), null);
+  assert.equal(toml('["project"]\nname = "unsure"\n'), null);
+});
+
+test("projectNameFromMetadata refuses a value configparser continues and a multi-line TOML string", () => {
+  const cfg = (text) => projectNameFromMetadata("setup.cfg", text);
+  // configparser reads "httpie\nevil": an indented line after the key continues it, blank lines in between or not.
+  assert.equal(cfg("[metadata]\nname = httpie\n  evil\n"), null);
+  assert.equal(cfg("[metadata]\nname = httpie\n\n  more\n"), null);
+  assert.equal(cfg("[metadata]\nname = httpie\n# c\nversion = 1\n"), "httpie");
+  const toml = (text) => projectNameFromMetadata("pyproject.toml", text);
+  // A "name = ..." inside a multi-line string isn't a key, and the reader doesn't track strings: it refuses.
+  assert.equal(toml('[project]\ndescription = """\nname = "evil"\n"""\nname = "real"\n'), null);
+  assert.equal(toml("[project]\ndescription = '''\nname = \"evil\"\n'''\nname = \"real\"\n"), null);
+  assert.equal(toml('[project]\nname = "real"\ndescription = """x"""\n'), "real");
+});
+
+test("the project name is read from a lone root pyproject.toml, then a root setup.cfg, and only then", () => {
+  const pyproject = [{ path: "pyproject.toml", offline: false }];
+  assert.deepEqual(metadataFiles([], ["setup.cfg", "setup.py"]), ["setup.cfg"]);
+  assert.deepEqual(metadataFiles([], ["setup.py"]), []);
+  // The usual setuptools layout: a pyproject.toml with only [build-system], and the name in setup.cfg.
+  assert.deepEqual(metadataFiles(pyproject, ["pyproject.toml", "setup.cfg"]), ["pyproject.toml", "setup.cfg"]);
+  assert.deepEqual(metadataFiles(pyproject, ["pyproject.toml"]), ["pyproject.toml"]);
+  // Another file to check, or a pyproject.toml that isn't the root's: no package fallback.
+  assert.deepEqual(metadataFiles([...pyproject, { path: "requirements.txt", offline: false }], ["setup.cfg"]), []);
+  assert.deepEqual(metadataFiles([{ path: "app/pyproject.toml", offline: false }], ["setup.cfg"]), []);
+  assert.deepEqual(metadataFiles([], ["pkg/setup.cfg"]), []);
+});
+
+test("fixPrompt reproduces the check", () => {
   const fixes = { "a==1.0": { found: { "3.14 win-arm64": "1.1" }, loses: [] }, "b==2.0": { found: {}, loses: [] } };
   const prompt = fixPrompt("o/r", result, fixes, ["3.14"], ["linux-x86_64", "win-arm64"]);
   assert.match(prompt, /- a 1\.0 -> 1\.1\n/);
@@ -209,6 +452,80 @@ test("the verdict reads right for one target and many", () => {
   assert.equal(verdictText({ gaps: 0, packages: 10, targets: 6 }), "✓ All 10 packages have a wheel for all 6 targets");
   // Every package skipped (a requirements file that names another index, say), or none listed: never a ✓.
   assert.equal(verdictText({ gaps: 0, unknown: 0, packages: 0, targets: 4 }), "No packages were checked");
+});
+
+test("shareText formats clean, gaps, unknowns, single target, and special characters as plain text", () => {
+  const url = "https://wheelgap.github.io/tracker/check/?repo=owner/name";
+  const sixPlatforms = ["linux-x86_64", "linux-aarch64", "musl-x86_64", "macos-arm64", "win-amd64", "win-arm64"];
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 0, packages: 212, targets: 12 }, ["3.14", "3.13"], sixPlatforms, url),
+    `✓ owner/name: all 212 dependencies have a wheel on Python 3.13, 3.14 for 6 platforms (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { gaps: 3, unknown: 0, packages: 212, targets: 6 }, ["3.14"], sixPlatforms, url),
+    `owner/name: 3 of 212 dependencies have no wheel on at least one of 6 targets (checked with wheelgap) ${url}`,
+  );
+  // Unknowns must never carry a ✓.
+  const withUnknown = shareText("owner/name", { gaps: 0, unknown: 2, packages: 212, targets: 6 }, ["3.14"], sixPlatforms, url);
+  assert.equal(
+    withUnknown,
+    `owner/name: no dependency is missing a wheel, but 2 of 212 couldn't be checked on some targets (checked with wheelgap) ${url}`,
+  );
+  assert.ok(!withUnknown.includes("✓"));
+  // One target / one platform / one gap.
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 0, packages: 1, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `✓ owner/name: 1 dependency has a wheel on Python 3.14 for 1 platform (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { gaps: 1, unknown: 0, packages: 10, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: 1 of 10 dependencies has no wheel on 1 target (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 1, packages: 10, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: no dependency is missing a wheel, but 1 of 10 couldn't be checked on 1 target (checked with wheelgap) ${url}`,
+  );
+  // Nothing checked: never a ✓.
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 0, packages: 0, targets: 4 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: no dependencies were checked (checked with wheelgap) ${url}`,
+  );
+  // Plain text, never HTML-escaped: characters like <, >, &, ", ' stay verbatim.
+  const rawName = `a&b/<c>"d'`;
+  const line = shareText(rawName, { gaps: 0, unknown: 0, packages: 5, targets: 1 }, ["3.14"], ["linux-x86_64"], url);
+  assert.equal(
+    line,
+    `✓ a&b/<c>"d': all 5 dependencies have a wheel on Python 3.14 for 1 platform (checked with wheelgap) ${url}`,
+  );
+  assert.ok(!line.includes("&amp;") && !line.includes("&lt;"));
+});
+
+test("shareText never reads as fully clean when a private index's packages weren't checked", () => {
+  // The line is pasted without the page's alerts, so it says how many were left off pypi.org, and drops the ✓.
+  const url = "https://wheelgap.github.io/tracker/check/?repo=owner/name";
+  const clean = { gaps: 0, unknown: 0, packages: 12, targets: 2 };
+  const line = shareText("owner/name", clean, ["3.14"], ["linux-x86_64", "win-amd64"], url, 5);
+  assert.equal(
+    line,
+    `owner/name: all 12 dependencies checked have a wheel on Python 3.14 for 2 platforms; 5 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+  );
+  assert.ok(!line.includes("✓"));
+  assert.equal(
+    shareText("owner/name", { ...clean, packages: 1 }, ["3.14"], ["linux-x86_64"], url, 1),
+    `owner/name: 1 dependency checked has a wheel on Python 3.14 for 1 platform; 1 more wasn't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { ...clean, gaps: 2 }, ["3.14"], ["linux-x86_64"], url, 3),
+    `owner/name: 2 of 12 dependencies have no wheel on at least one of 2 targets; 3 more weren't checked (their index isn't known to be PyPI) (checked with wheelgap) ${url}`,
+  );
+  // Every package private: nothing was checked, and the line says only that.
+  assert.equal(
+    shareText("owner/name", { ...clean, packages: 0 }, ["3.14"], ["linux-x86_64"], url, 4),
+    `owner/name: no dependencies were checked (checked with wheelgap) ${url}`,
+  );
+  // No private packages: the line is unchanged, ✓ and all.
+  assert.equal(shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url, 0), shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url));
+  assert.match(shareText("owner/name", clean, ["3.14"], ["linux-x86_64"], url), /^✓ /);
 });
 
 test("next steps offer what isn't picked yet, as whole selections", () => {
@@ -273,6 +590,50 @@ test("the page says why lookups got no answer, and nothing when they all did", (
   );
 });
 
+test("the page says why a file's packages were kept off pypi.org, naming the settings files behind it", () => {
+  const base = { lockfile: "app/requirements.txt", private: [], configs: [], configs_unread: [], configs_unknown: false };
+  assert.equal(privateText(base), null);
+  assert.equal(privateText({ lockfile: "uv.lock", skipped: [] }), null); // a result from before the fields existed
+  const names = { ...base, private: ["corp-secret-lib"] };
+  const after = "so these may not be PyPI's packages and their names aren't sent to pypi.org: corp-secret-lib.";
+  const index = "names an index or source other than PyPI (an --index-url or --extra-index-url line, a [tool.uv] index or sources setting, a Pipfile source)";
+  assert.equal(
+    privateText(names),
+    `Not checked: app/requirements.txt ${index}, ${after} To check them on that index, run uvx wheelgap --index-url with its URL in a checkout.`,
+  );
+  // The settings files read for it may be the ones that name it.
+  assert.equal(
+    privateText({ ...names, configs: ["pyproject.toml", "app/uv.toml"] }),
+    `Not checked: app/requirements.txt or its installer settings (pyproject.toml, app/uv.toml) ${index}, ${after} To check them on that index, run uvx wheelgap --index-url with its URL in a checkout.`,
+  );
+  // One that couldn't be fetched (or is named in another case), or a file list GitHub cut short: what they say about an index isn't known.
+  assert.equal(
+    privateText({ ...names, configs_unread: ["pyproject.toml"] }),
+    `Not checked: pyproject.toml (beside app/requirements.txt or in a folder above it) couldn't be read here. Such a file can point installers at an index other than PyPI (a [tool.uv] index, say), ${after} Check again to retry, or run uvx wheelgap app/requirements.txt in a checkout.`,
+  );
+  assert.equal(
+    privateText({ ...names, configs_unknown: true }),
+    `Not checked: GitHub listed only part of this repo's files, so a uv.toml, pyproject.toml or pdm.toml beside app/requirements.txt or in a folder above it may be missing from the list. Such a file can point installers at an index other than PyPI (a [tool.uv] index, say), ${after} uvx wheelgap app/requirements.txt in a checkout reads them all.`,
+  );
+  const many = privateText({ ...base, private: Array.from({ length: 10 }, (_, i) => `p${i}`), configs_unread: ["a/pdm.toml", "a/uv.toml", "pdm.toml", "uv.toml"] });
+  assert.match(many, /^Not checked: a\/pdm\.toml, a\/uv\.toml, pdm\.toml, and 1 more \(beside/);
+  assert.match(many, /p0, p1, p2, p3, p4, p5, p6, p7, and 2 more\./);
+});
+
+test("privateText's index advice follows the reader: the CLI checks a requirements file's or pyproject's on PyPI", () => {
+  // driver.check's `reader`. --index-url alone isn't the same install as an --extra-index-url; a Pipfile.lock's or
+  // pixi.lock's pinned index is skipped by the CLI too, so --index-url stays the advice there.
+  const base = { lockfile: "requirements.txt", private: ["corp-pkg"], configs: [], configs_unread: [], configs_unknown: false };
+  for (const reader of ["requirements", "pyproject"]) {
+    assert.match(privateText({ ...base, reader }), /corp-pkg\. uvx wheelgap requirements\.txt in a checkout checks them on PyPI's files\.$/);
+  }
+  for (const reader of ["pipfile", "pixi", undefined]) {
+    assert.match(privateText({ ...base, reader }), /To check them on that index, run uvx wheelgap --index-url with its URL in a checkout\.$/);
+  }
+  // Unread or unknown settings files keep their own advice.
+  assert.match(privateText({ ...base, reader: "requirements", configs_unknown: true }), /uvx wheelgap requirements\.txt in a checkout reads them all\.$/);
+});
+
 test("refs with '..' or empty segments are refused", () => {
   assert.ok(validRef("main") && validRef("feature/x") && validRef("v1.2.3"));
   for (const bad of ["..", "a/../b", "a//b", "/a", "a/", ".", "a b"]) assert.equal(validRef(bad), false, bad);
@@ -321,3 +682,86 @@ test("the copy prompt includes only the driver's gap wheel instructions", () => 
   assert.match(prompt, /unofficial, built by wheelgap/);
   assert.ok(prompt.includes(gapWheels.text));
 });
+
+test("fixLinks picks a row's links under Fix: none, loses, gap wheel, private, and invalid issues URLs", () => {
+  const rNone = { name: "demo-pkg", version: "1.0", gaps: ["3.14 linux-x86_64"], lookup: true };
+  const fNone = { kind: "none", text: "no newer release has a wheel" };
+
+  // 1. none with issues_url:
+  const withIssues = fixLinks(rNone, fNone, { ok: true, issues_url: "https://github.com/org/demo/issues" });
+  assert.deepEqual(withIssues, [
+    { text: "coverage and build results", href: "../p/demo-pkg/" },
+    { text: "ask the maintainers", href: "https://github.com/org/demo/issues", rel: "noopener nofollow" },
+  ]);
+
+  // none without issues_url:
+  const withoutIssues = fixLinks(rNone, fNone, { ok: true });
+  assert.deepEqual(withoutIssues, [
+    { text: "coverage and build results", href: "../p/demo-pkg/" },
+  ]);
+
+  // 2. loses:
+  const fLoses = { kind: "loses", text: "only releases that drop a wheel elsewhere" };
+  const losesLinks = fixLinks(rNone, fLoses, { ok: true, issues_url: "https://github.com/org/demo/issues" });
+  assert.deepEqual(losesLinks, [
+    { text: "coverage and build results", href: "../p/demo-pkg/" },
+    { text: "ask the maintainers", href: "https://github.com/org/demo/issues", rel: "noopener nofollow" },
+  ]);
+
+  // 3. a row a gap wheel fills (no links needed):
+  const gapWheels = {
+    cells: [{ name: "demo-pkg", version: "1.0", target: "3.14 linux-x86_64" }],
+    text: "gap-wheels",
+    unofficial: "unofficial",
+  };
+  assert.deepEqual(fixLinks(rNone, fNone, { ok: true, issues_url: "https://github.com/org/demo/issues" }, gapWheels), []);
+
+  // 4. private (none):
+  const rPriv = { name: "corp-lib", version: "1.0", gaps: ["3.14 linux-x86_64"], lookup: false };
+  const fPriv = { kind: "private", text: "not looked up" };
+  assert.deepEqual(fixLinks(rPriv, fPriv, { ok: true, issues_url: "https://github.com/org/demo/issues" }), []);
+
+  // 5. an issues_url that isn't https or is on an unknown host (dropped):
+  const notHttps = fixLinks(rNone, fNone, { ok: true, issues_url: "http://insecure.example/issues" });
+  assert.deepEqual(notHttps, [{ text: "coverage and build results", href: "../p/demo-pkg/" }]);
+
+  const noHost = fixLinks(rNone, fNone, { ok: true, issues_url: "https:///issues" });
+  assert.deepEqual(noHost, [{ text: "coverage and build results", href: "../p/demo-pkg/" }]);
+
+  const userinfo = fixLinks(rNone, fNone, { ok: true, issues_url: "https://github.com@evil.example/issues" });
+  assert.deepEqual(userinfo, [{ text: "coverage and build results", href: "../p/demo-pkg/" }]);
+
+  const controlChar = fixLinks(rNone, fNone, { ok: true, issues_url: "https://github.com/org/demo/issues\n" });
+  assert.deepEqual(controlChar, [{ text: "coverage and build results", href: "../p/demo-pkg/" }]);
+
+  // A package the tracker doesn't have, or no answer yet: no links (loadLab() keeps no issues_url for it).
+  assert.deepEqual(fixLinks(rNone, fNone, { ok: false, builds: [], issues_url: null }), []);
+  assert.deepEqual(fixLinks(rNone, fNone, null), []);
+
+  // fixPrompt includes the issue tracker URL for none and loses groups when known
+  const prompt = fixPrompt(
+    "o/r",
+    { lockfile: "uv.lock", rows: [rNone] },
+    { "demo-pkg==1.0": { found: {}, loses: [] } },
+    ["3.14"],
+    ["linux-x86_64"],
+    null,
+    { "demo-pkg": { issues_url: "https://github.com/org/demo/issues" } }
+  );
+  assert.match(prompt, /- demo-pkg 1\.0: 3\.14 linux-x86_64 \(ask the maintainers: https:\/\/github\.com\/org\/demo\/issues\)/);
+});
+
+test("validIssuesUrl makes the package page's valid_issues_url() check, host by any name", () => {
+  // scripts/build_pages.py's valid_issues_url() has no list of hosts: any https URL with a host that isn't user@,
+  // with printable ASCII only. The page links what the package page links, and nothing it refuses.
+  for (const yes of ["https://github.com/o/r/issues", "https://bugs.launchpad.net/x", "https://jira.example.org/browse/X",
+    "HTTPS://gitlab.com/o/r/-/issues", "https://localhost/issues", "https://github.com:443/o/r/issues?q=is%3Aopen#top"]) {
+    assert.equal(validIssuesUrl(yes), true, yes);
+  }
+  for (const no of ["http://github.com/o/r/issues", "https:///issues", "https://", "https://a@b.example/", "https://@b.example/",
+    "https://:@b.example/", "https://b.example/ x", "https://b.example/\u00e9", "https://b.example/\x1b[2J", "javascript:alert(1)",
+    "//github.com/o/r", "", null, undefined, 42]) {
+    assert.equal(validIssuesUrl(no), false, String(no));
+  }
+});
+
