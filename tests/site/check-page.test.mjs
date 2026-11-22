@@ -301,7 +301,7 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   const rn = source.match(/^function renderNext\(\) \{.*?^}$/ms);
   assert.ok(rv && rn, "renderVerdict and renderNext are in check.mjs");
 
-  const run = (rows, packages = 5, targets = [{ label: "3.14 linux-x86_64", python: "3.14", platform: "linux-x86_64" }]) => {
+  const run = (rows, packages = 5, targets = [{ label: "3.14 linux-x86_64", python: "3.14", platform: "linux-x86_64" }], extra = {}) => {
     const made = new Map();
     const element = (key) => {
       if (!made.has(key)) {
@@ -322,7 +322,7 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
       plan: { lockfiles: [{ path: "uv.lock" }] },
       pythons: ["3.14"],
       platforms: ["linux-x86_64"],
-      result: { lockfile: "uv.lock", packages, targets, outside_lock: [], rows, skipped: [], private: [], looked_up: false },
+      result: { lockfile: "uv.lock", packages, targets, outside_lock: [], rows, skipped: [], private: [], looked_up: false, ...extra },
     };
     const fns = new Function(
       "$", "state", "el", "headline", "verdictText", "nextSteps", "sortPythons", "missedText", "cliCommand", "badgeMarkdown", "pickLockfile",
@@ -361,6 +361,11 @@ test("a clean verdict offers the README badge in the verdict card and hides it f
   // Nothing checked: verdict badge hidden.
   const empty = run([], 0);
   assert.equal(empty("verdict-badge").hidden, true);
+
+  // Clean, but a private index's packages weren't checked: no badge offer and no "Keep it green".
+  const withPrivate = run([], 5, undefined, { private: ["corp"], skipped: ["corp"] });
+  assert.equal(withPrivate("verdict-badge").hidden, true);
+  assert.equal(withPrivate("next-title").textContent, "Fix it");
 
   // Both new copy buttons use copy() like the existing ones.
   assert.match(source, /\$\("copy-verdict-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);

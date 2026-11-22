@@ -251,7 +251,8 @@ function renderVerdict() {
   const repoName = `${state.repo.owner}/${state.repo.name}`;
   const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
   card.classList.toggle("clean", isClean);
-  $("verdict-badge").hidden = !isClean;
+  // Not offered while a private index's packages went unchecked: "keep it that way" would claim a pass for them too.
+  $("verdict-badge").hidden = !isClean || (r.private || []).length > 0;
   $("verdict").textContent = h.targets === 0 ? `${repoName}'s lockfile leaves out every Python picked` : verdictText(h);
   const steps = nextSteps(state.pythons, state.platforms);
   $("next").hidden = !steps.length;
@@ -418,7 +419,7 @@ function renderNext() {
   const r = state.result;
   const h = headline(r);
   const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
-  $("next-title").textContent = isClean ? "Keep it green" : "Fix it";
+  $("next-title").textContent = isClean && !(r.private || []).length ? "Keep it green" : "Fix it";
   $("copy-prompt").hidden = isClean;
   $("prompt-note").hidden = isClean;
   $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
