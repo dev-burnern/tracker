@@ -83,6 +83,17 @@ test("inputHint identifies package names and non-GitHub hosts, and ignores every
   assert.deepEqual(inputHint("gitlab.com"), { kind: "other-host", host: "gitlab.com" });
   assert.deepEqual(inputHint("codeberg.org"), { kind: "other-host", host: "codeberg.org" });
   assert.deepEqual(inputHint("zope.interface"), { kind: "package", name: "zope-interface" });
+  assert.deepEqual(inputHint("jaraco.net"), { kind: "package", name: "jaraco-net" });
+  assert.deepEqual(inputHint("https://pypi.org/project/NumPy/"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("pypi.org/project/ruamel.yaml/0.18.6/"), { kind: "package", name: "ruamel-yaml" });
+  // Every input that gets a hint is one parseRepo() rejects, or the page would check it as a GitHub repo instead.
+  for (const hinted of [
+    "numpy", "gitlab.com/owner/project", "codeberg.org/owner/project", "bitbucket.org/o/r", "gitlab.com/owner",
+    "https://gitlab.com/owner/project", "git@gitlab.com:owner/project.git", "pypi.org/project/numpy", "https://pypi.org/project/numpy/",
+  ]) {
+    assert.ok(inputHint(hinted), hinted);
+    assert.equal(parseRepo(hinted), null, hinted);
+  }
   // GitHub's own hosts get the default message, not "GitHub repositories only".
   for (const none of [
     "owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2", "github.com", "www.github.com",

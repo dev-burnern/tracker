@@ -485,7 +485,10 @@ $("form").addEventListener("submit", (e) => {
   const repo = parseRepo(text);
   if (!repo) return showInputError(text);
   if (ref) {
-    if (!validRef(ref)) return status("That branch or tag name isn't one this page can read.", true);
+    if (!validRef(ref)) {
+      state.inputError = true; // like showInputError(): start-up progress mustn't replace it
+      return status("That branch or tag name isn't one this page can read.", true);
+    }
     repo.ref = ref;
   }
   start(repo);

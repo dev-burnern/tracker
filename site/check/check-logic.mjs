@@ -34,7 +34,8 @@ export function parseRepo(input) {
   if (parts.length < 2) return null;
   const owner = parts[0];
   const name = parts[1].replace(/\.git$/i, "");
-  if (!NAME.test(owner) || !NAME.test(name) || owner.startsWith(".") || name === "." || name === "..") return null;
+  // GitHub user and org names have no dots, so "gitlab.com/owner/project" is another host, not a GitHub owner.
+  if (!NAME.test(owner) || !NAME.test(name) || owner.includes(".") || name === "." || name === "..") return null;
   let ref = null;
   let dir = null;
   if ((parts[2] === "tree" || parts[2] === "blob") && parts[3]) {
@@ -364,10 +365,14 @@ function hostHint(host) {
   return !h || githubHost(h) ? null : { kind: "other-host", host: h };
 }
 
+const FORGES = ["gitlab.com", "codeberg.org", "bitbucket.org", "sr.ht", "git.sr.ht", "gitea.com", "sourceforge.net", "salsa.debian.org"];
+
 // Classify an input parseRepo() rejected: a single PyPI package name, a URL on another host, or null.
 export function inputHint(text) {
   const s = String(text ?? "").trim();
   if (!s || /\s/.test(s)) return null;
+  const pypi = s.match(/^(?:https?:\/\/)?(?:www\.)?pypi\.org\/(?:project|simple)\/([A-Za-z0-9._-]+)/i);
+  if (pypi) return { kind: "package", name: canonicalName(pypi[1]) };
   const ssh = s.match(/^(?:ssh:\/\/)?git@([A-Za-z0-9.-]+)[:/]/i);
   if (ssh) return hostHint(ssh[1]);
   // A URL with a scheme (https://, git+https://, ssh://), or one without where the first segment is a host.
@@ -380,8 +385,10 @@ export function inputHint(text) {
       return null;
     }
   }
-  // A bare domain (gitlab.com, codeberg.org) is a host, not a package called gitlab-com.
-  if (/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.(com|org|net|io|dev)$/i.test(s)) return hostHint(s);
+  // A known forge's bare domain (gitlab.com, codeberg.org) is a host; other dotted names (jaraco.net) are packages.
+  const bare = s.toLowerCase().replace(/^www\./, "");
+  if (FORGES.includes(bare)) return hostHint(s);
+  if (githubHost(bare)) return null;
   if (!s.includes("/") && /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/.test(s)) {
     return { kind: "package", name: canonicalName(s) };
   }
