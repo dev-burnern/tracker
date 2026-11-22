@@ -354,6 +354,28 @@ export function canonicalName(name) {
   return String(name).toLowerCase().replace(/[-_.]+/g, "-");
 }
 
+// Classify an input parseRepo() rejected: a single PyPI package name, a URL on another host, or null.
+export function inputHint(text) {
+  const s = String(text ?? "").trim();
+  if (!s || /\s/.test(s)) return null;
+  const ssh = s.match(/^git@([A-Za-z0-9.-]+):/);
+  if (ssh) {
+    const host = ssh[1].toLowerCase().replace(/^www\./, "");
+    return host === "github.com" ? null : { kind: "other-host", host };
+  }
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const host = new URL(s).hostname.toLowerCase().replace(/^www\./, "");
+      if (host && host !== "github.com") return { kind: "other-host", host };
+    } catch {}
+    return null;
+  }
+  if (!s.includes("/") && /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/.test(s)) {
+    return { kind: "package", name: canonicalName(s) };
+  }
+  return null;
+}
+
 // The lab result for exactly this release on this target (label like "3.14t win-arm64"), or null: a result for
 // another version says nothing about the pinned one.
 export function labFor(builds, version, label) {

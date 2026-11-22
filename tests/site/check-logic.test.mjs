@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, inputHint, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -66,6 +66,18 @@ test("parseRepo reads the forms people paste", () => {
 test("parseRepo refuses what isn't a repo", () => {
   for (const bad of ["", "fastapi", "https://gitlab.com/a", "a b/c", "../x", "o/..", "o/r/tree/main/../../etc", "javascript:alert(1)", "o/r/tree/ma in/x"]) {
     assert.equal(parseRepo(bad), null, bad);
+  }
+});
+
+test("inputHint identifies package names and non-GitHub hosts, and ignores everything else", () => {
+  assert.deepEqual(inputHint("numpy"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("Pillow"), { kind: "package", name: "pillow" });
+  assert.deepEqual(inputHint("ruamel.yaml"), { kind: "package", name: "ruamel-yaml" });
+  assert.deepEqual(inputHint("https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("https://codeberg.org/owner/project"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("git@gitlab.com:owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  for (const none of ["owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2"]) {
+    assert.equal(inputHint(none), null, none);
   }
 });
 
