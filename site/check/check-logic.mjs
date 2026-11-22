@@ -251,6 +251,63 @@ export function cliCommand(result, pythons, platforms) {
   return `uvx wheelgap ${lock} -p ${sortPythons(pythons).join(",")} -t ${platforms.join(",")}`;
 }
 
+const PACKAGE_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
+
+// Read the published PyPI package name from a root setup.cfg ([metadata] name) or pyproject.toml ([project] name).
+// Only accepts a plain valid package name (never attr:, file:, or characters a package name can't have).
+export function projectNameFromMetadata(filename, text) {
+  if (typeof text !== "string") return null;
+  let section = null;
+  if (filename === "setup.cfg") {
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+      const hdr = line.match(/^\[([^\]]+)\]$/);
+      if (hdr) {
+        section = hdr[1].trim().toLowerCase();
+        continue;
+      }
+      if (section === "metadata") {
+        const m = line.match(/^name\s*[=:]\s*(.+?)\s*$/i);
+        if (m) {
+          const val = m[1].trim();
+          if (/^(?:attr|file)\s*:/i.test(val)) return null;
+          return PACKAGE_NAME.test(val) ? val : null;
+        }
+      }
+    }
+    return null;
+  }
+  if (filename === "pyproject.toml") {
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const hdr = line.match(/^\[([^\]]+)\]$/);
+      if (hdr) {
+        section = hdr[1].trim();
+        continue;
+      }
+      if (section === "project") {
+        const m = line.match(/^name\s*=\s*(?:"([^"\\]+)"|'([^']+)')\s*(?:#.*)?$/);
+        if (m) {
+          const val = (m[1] ?? m[2]).trim();
+          return PACKAGE_NAME.test(val) ? val : null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// The `uvx wheelgap --deps <package>` command for a library published on PyPI.
+export function packageCliCommand(packageName, pythons, platforms) {
+  if (!PACKAGE_NAME.test(String(packageName ?? ""))) return null;
+  const parts = [`uvx wheelgap --deps ${packageName}`];
+  if (pythons?.length) parts.push(`-p ${sortPythons(pythons).join(",")}`);
+  if (platforms?.length) parts.push(`-t ${platforms.join(",")}`);
+  return parts.join(" ");
+}
+
 // Look up a fill the Python driver already matched, for display only.
 export function gapWheelFor(row, gapWheels, target) {
   return gapWheels?.cells.some((cell) => cell.name === row.name && cell.version === row.version && cell.target === target) ?? false;

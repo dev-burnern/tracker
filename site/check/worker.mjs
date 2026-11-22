@@ -4,7 +4,7 @@
 // Messages in: {id, type: "load", repo} | {id, type: "check", lockfile, options}. Out: {id, type, ...}.
 
 import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.8/full/pyodide.mjs";
-import { rawUrl, trimProject, trimReleases } from "./check-logic.mjs";
+import { rawUrl, trimProject, trimReleases, projectNameFromMetadata } from "./check-logic.mjs";
 
 // The wheelgap release the page runs; tests/test_check_driver.py tests driver.py against the same one.
 // When this changes, re-read what that release's pypi._fill_json_data, pypi._newest_matching and suggest._has_wheel
@@ -121,13 +121,25 @@ async function load(r, id) {
   py.FS.mkdirTree(root);
   const detected = JSON.parse(driver.detect(root));
   detected.unreadable.push(...unread);
+  let projectName = null;
+  const metaFile = !plan.lockfiles.length && paths.includes("setup.cfg")
+    ? "setup.cfg"
+    : (plan.lockfiles.length === 1 && plan.lockfiles[0].path === "pyproject.toml" ? "pyproject.toml" : null);
+  if (metaFile) {
+    try {
+      const text = new TextDecoder().decode(await getText(rawUrl(r, ref, metaFile)));
+      projectName = projectNameFromMetadata(metaFile, text);
+    } catch {
+      // ignore metadata fetch failure; fall back to normal verdict
+    }
+  }
   if (id !== latestLoad) {
     forget(py, root);
     throw new Failure("stale", "superseded by a newer load"); // the page has moved on and ignores this
   }
   for (const old of [...loaded.keys()]) forget(py, old);
   loaded.set(root, { ...r, ref, root, fetched: new Set() });
-  return { plan, detected, truncated: Boolean(tree.truncated), ref, root };
+  return { plan, detected, truncated: Boolean(tree.truncated), ref, root, projectName };
 }
 
 // A pyproject.toml is fetched when it's the file to check. wheelgap also reads one beside a lockfile or a

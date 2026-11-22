@@ -3,7 +3,7 @@
 
 import {
   PLATFORMS, PYTHONS, parseRepo, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded,
-  fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  fixFor, rowsFor, headline, cliCommand, packageCliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown,
 } from "./check-logic.mjs";
 
@@ -69,7 +69,7 @@ const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "mod
 let seq = 0;
 let wheelgapVersion = null;
 const state = {
-  repo: null, ref: null, root: null, plan: null, detected: null, lockfile: null, auto: false, pythons: [], platforms: [],
+  repo: null, ref: null, root: null, plan: null, detected: null, projectName: null, lockfile: null, auto: false, pythons: [], platforms: [],
   result: null, fixes: null, gapWheels: null, fixesDone: false, python: null, platform: null, showAll: false, truncated: false, lab: {},
 };
 
@@ -140,8 +140,8 @@ function start(repo, query = null) {
   worker.postMessage({ id: ++seq, type: "load", repo });
 }
 
-function onLoaded({ plan, detected, truncated, ref, root }) {
-  Object.assign(state, { plan, detected, truncated, ref, root });
+function onLoaded({ plan, detected, truncated, ref, root, projectName = null }) {
+  Object.assign(state, { plan, detected, truncated, ref, root, projectName });
   const q = state.query;
   const named = q?.lockfile && plan.lockfiles.find((l) => l.path === q.lockfile);
   const lock = named || pickLockfile(plan.lockfiles, state.repo.dir);
@@ -191,6 +191,9 @@ function onResult(result) {
   }
   if (result.error) {
     status(result.kind === "source" ? `wheelgap couldn't read ${state.lockfile}: ${result.error}` : result.error, true);
+    if (result.kind === "source" && state.projectName && state.lockfile === "pyproject.toml") {
+      showPackageFallback(state.projectName);
+    }
     return;
   }
   state.result = result;
@@ -203,10 +206,47 @@ function onResult(result) {
   $("out").hidden = false;
 }
 
+function showPackageFallback(packageName) {
+  const pythons = state.pythons?.length ? state.pythons : sortPythons(state.detected?.pythons || []);
+  const platforms = state.platforms?.length
+    ? state.platforms
+    : (state.detected?.platforms || []).filter((p) => NAMES[p]);
+  const cmd = packageCliCommand(packageName, pythons, platforms.length ? platforms : ["linux-x86_64"]);
+  $("out").hidden = false;
+  $("verdict").textContent = `No lockfile found, but this looks like the PyPI package ${packageName}.`;
+  $("verdict-detail").textContent = "wheelgap can check the published package's dependencies directly:";
+  const items = [];
+  if (cmd) {
+    items.push(
+      el("pre", {}, el("code", { text: cmd })),
+      el("button", { type: "button", class: "action", text: "Copy command", onclick: (e) => copy(e.currentTarget, cmd, "Command copied") }),
+    );
+  }
+  const trackerSlot = el("p", { class: "note" });
+  items.push(trackerSlot);
+  $("alerts").replaceChildren(...items);
+  hideResultSections(true);
+  const canonical = canonicalName(packageName);
+  if (/^[a-z0-9]+(-[a-z0-9]+)*$/.test(canonical) && typeof fetch === "function") {
+    fetch(new URL(`../data/packages/${canonical}.json`, location.href), { method: "HEAD" })
+      .then((r) => {
+        if (r.ok && state.projectName === packageName) {
+          trackerSlot.replaceChildren(
+            "Or view ",
+            el("a", { href: `../p/${encodeURIComponent(canonical)}/` }, `${packageName} on the wheelgap tracker`),
+            ".",
+          );
+        }
+      })
+      .catch(() => {});
+  }
+}
+
 function noLockfile() {
+  if (state.projectName) return showPackageFallback(state.projectName);
   $("out").hidden = false;
   $("verdict").textContent = "No lockfile found";
-  $("verdict-detail").textContent = `The repo check reads a uv.lock, poetry.lock, pdm.lock, pylock.toml, Pipfile.lock, requirements.txt, pixi.lock or pyproject.toml, and ${state.repo.owner}/${state.repo.name} has none${state.truncated ? " in the part of its file list GitHub returned" : ""}. Run uvx wheelgap in a checkout for anything else.`;
+  $("verdict-detail").textContent = `The repo check reads a uv.lock, poetry.lock, pdm.lock, pylock.toml, Pipfile.lock, requirements.txt, pixi.lock or pyproject.toml, and ${state.repo.owner}/${state.repo.name} has none${state.truncated ? " in the part of its file list GitHub returned" : ""}.`;
   for (const id of ["alerts"]) $(id).replaceChildren();
   hideResultSections(true);
 }

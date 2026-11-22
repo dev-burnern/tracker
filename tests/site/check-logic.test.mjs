@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
-  cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  cliCommand, packageCliCommand, projectNameFromMetadata, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
 
@@ -193,6 +193,23 @@ test("rowsFor lists one Python's gaps, most first; headline counts distinct pack
 test("the CLI command and the fix prompt reproduce the check", () => {
   assert.equal(cliCommand(result, ["3.14t", "3.14"], ["linux-x86_64", "win-arm64"]), "uvx wheelgap uv.lock -p 3.14,3.14t -t linux-x86_64,win-arm64");
   assert.equal(cliCommand({ lockfile: "my app/uv.lock" }, ["3.14"], ["linux-x86_64"]), "uvx wheelgap 'my app/uv.lock' -p 3.14 -t linux-x86_64");
+  assert.equal(packageCliCommand("httpie", ["3.14", "3.13"], ["linux-x86_64", "win-arm64"]), "uvx wheelgap --deps httpie -p 3.13,3.14 -t linux-x86_64,win-arm64");
+  assert.equal(packageCliCommand("httpie; rm -rf /", ["3.14"], ["linux-x86_64"]), null);
+});
+
+test("projectNameFromMetadata reads plain names from setup.cfg and pyproject.toml and rejects dynamic or invalid ones", () => {
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = httpie\nversion = 3.2.4\n"), "httpie");
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = attr: pkg.__name__\n"), null);
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = file: NAME.txt\n"), null);
+  assert.equal(projectNameFromMetadata("setup.cfg", "[metadata]\nname = bad name!\n"), null);
+  assert.equal(projectNameFromMetadata("setup.cfg", "[options]\nname = wrong-section\n"), null);
+  assert.equal(projectNameFromMetadata("pyproject.toml", '[project]\nname = "x"\ndynamic = ["dependencies"]\n'), "x");
+  assert.equal(projectNameFromMetadata("pyproject.toml", "[project]\nname = 'my_pkg'\n"), "my_pkg");
+  assert.equal(projectNameFromMetadata("pyproject.toml", '[tool.ruff]\nname = "nope"\n'), null);
+  assert.equal(projectNameFromMetadata("setup.py", 'setup(name="ignored")\n'), null);
+});
+
+test("fixPrompt reproduces the check", () => {
   const fixes = { "a==1.0": { found: { "3.14 win-arm64": "1.1" }, loses: [] }, "b==2.0": { found: {}, loses: [] } };
   const prompt = fixPrompt("o/r", result, fixes, ["3.14"], ["linux-x86_64", "win-arm64"]);
   assert.match(prompt, /- a 1\.0 -> 1\.1\n/);

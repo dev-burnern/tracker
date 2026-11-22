@@ -282,3 +282,51 @@ test("the badge is a small static image on the page's own origin, offered as Mar
   assert.match(page, /\$\("copy-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.doesNotMatch(page, /innerHTML/);
 });
+
+test("noLockfile offers the PyPI package command when setup.cfg names one, and keeps the plain verdict otherwise", () => {
+  const source = read("check.mjs");
+  const fb = source.match(/^function showPackageFallback\(.*?^}$/ms);
+  const nl = source.match(/^function noLockfile\(.*?^}$/ms);
+  assert.ok(fb && nl, "showPackageFallback and noLockfile are in check.mjs");
+
+  const run = (projectName) => {
+    const made = new Map();
+    const element = (key) => {
+      if (!made.has(key)) {
+        made.set(key, { hidden: null, textContent: "", children: [], replaceChildren(...kids) { this.children = kids; } });
+      }
+      return made.get(key);
+    };
+    const el = (tag, attrs = {}, ...kids) => ({ tag, attrs, kids });
+    const state = {
+      repo: { owner: "httpie", name: "cli" },
+      projectName,
+      truncated: false,
+      pythons: [],
+      platforms: [],
+      detected: { pythons: ["3.13"], platforms: ["linux-x86_64", "win-arm64"] },
+    };
+    const noLockfile = new Function(
+      "$", "el", "state", "NAMES", "sortPythons", "packageCliCommand", "canonicalName", "copy", "hideResultSections", "fetch", "location",
+      `${fb[0]}\n${nl[0]}\nreturn noLockfile;`,
+    )(
+      element, el, state, Object.fromEntries(checkLogic.PLATFORMS), checkLogic.sortPythons,
+      checkLogic.packageCliCommand, checkLogic.canonicalName, () => {}, () => {}, undefined, { href: "https://wheelgap.github.io/tracker/check/" },
+    );
+    noLockfile();
+    return element;
+  };
+
+  const withPkg = run("httpie");
+  assert.equal(withPkg("verdict").textContent, "No lockfile found, but this looks like the PyPI package httpie.");
+  assert.equal(withPkg("alerts").children[0].tag, "pre");
+  assert.equal(
+    withPkg("alerts").children[0].kids[0].attrs.text,
+    "uvx wheelgap --deps httpie -p 3.13 -t linux-x86_64,win-arm64",
+  );
+
+  const withoutPkg = run(null);
+  assert.equal(withoutPkg("verdict").textContent, "No lockfile found");
+  assert.doesNotMatch(withoutPkg("verdict-detail").textContent, /Run uvx wheelgap in a checkout/);
+  assert.deepEqual(withoutPkg("alerts").children, []);
+});
