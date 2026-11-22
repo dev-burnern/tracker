@@ -357,3 +357,9 @@ test("an unknown row's reason is its Fix text, so a touch screen shows it too", 
   assert.match(source, /f\.kind === "unchecked" && row\.reason \? row\.reason : FIX_TEXT\[f\.kind\]\(f\)/);
   assert.equal(checkLogic.fixFor({ name: "torch", gaps: [], unknown: ["3.14 linux-x86_64"], lookup: false }, {}).kind, "unchecked");
 });
+
+test("a truncated file list passes no settings-file list, so an extra-index file stays private", () => {
+  // The driver refuses a null list (test_check_driver.py); a partial one could miss a root uv.toml or pyproject.toml.
+  assert.match(read("worker.mjs"), /configs: tree\.truncated \? null : plan\.configs/);
+});
+

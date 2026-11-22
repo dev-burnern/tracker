@@ -126,7 +126,9 @@ async function load(r, id) {
     throw new Failure("stale", "superseded by a newer load"); // the page has moved on and ignores this
   }
   for (const old of [...loaded.keys()]) forget(py, old);
-  loaded.set(root, { ...r, ref, root, fetched: new Set(), configs: plan.configs });
+  // A truncated file list may leave out a uv.toml or pyproject.toml beside a file: then the list says nothing for sure,
+  // and null makes the driver keep an extra-index file private.
+  loaded.set(root, { ...r, ref, root, fetched: new Set(), configs: tree.truncated ? null : plan.configs });
   return { plan, detected, truncated: Boolean(tree.truncated), ref, root };
 }
 
