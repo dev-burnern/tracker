@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, pickRequestedFile, isReadableFile, fileKind, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, inputHint, rawUrl, pickLockfile, pickRequestedFile, isReadableFile, fileKind, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -123,6 +123,40 @@ test("a named file is checked offline exactly when wheelgap reads it as a lockfi
   for (const path of ["pylock.dev.toml", "envs/uv-py312.lock", "tests/poetry.lock", "examples/pdm.lock"]) assert.equal(offline(path), true, path);
   for (const path of ["requirements-dev.lock", "requirements.uv.lock", "a/Pipfile.lock", "b/pixi.lock", "c/pyproject.toml", "reqs.in"]) {
     assert.equal(offline(path), false, path);
+  }
+});
+
+test("inputHint identifies package names and non-GitHub hosts, and ignores everything else", () => {
+  assert.deepEqual(inputHint("numpy"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("Pillow"), { kind: "package", name: "pillow" });
+  assert.deepEqual(inputHint("ruamel.yaml"), { kind: "package", name: "ruamel-yaml" });
+  assert.deepEqual(inputHint("https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("https://codeberg.org/owner/project"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("git@gitlab.com:owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("ssh://git@gitlab.com/owner/project.git"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("git+https://gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("gitlab.com/owner/project"), { kind: "other-host", host: "gitlab.com" });
+  // A bare domain is a host, not a package called gitlab-com.
+  assert.deepEqual(inputHint("gitlab.com"), { kind: "other-host", host: "gitlab.com" });
+  assert.deepEqual(inputHint("codeberg.org"), { kind: "other-host", host: "codeberg.org" });
+  assert.deepEqual(inputHint("zope.interface"), { kind: "package", name: "zope-interface" });
+  assert.deepEqual(inputHint("jaraco.net"), { kind: "package", name: "jaraco-net" });
+  assert.deepEqual(inputHint("https://pypi.org/project/NumPy/"), { kind: "package", name: "numpy" });
+  assert.deepEqual(inputHint("pypi.org/project/ruamel.yaml/0.18.6/"), { kind: "package", name: "ruamel-yaml" });
+  // Every input that gets a hint is one parseRepo() rejects, or the page would check it as a GitHub repo instead.
+  for (const hinted of [
+    "numpy", "gitlab.com/owner/project", "codeberg.org/owner/project", "bitbucket.org/o/r", "gitlab.com/owner",
+    "https://gitlab.com/owner/project", "git@gitlab.com:owner/project.git", "pypi.org/project/numpy", "https://pypi.org/project/numpy/",
+  ]) {
+    assert.ok(inputHint(hinted), hinted);
+    assert.equal(parseRepo(hinted), null, hinted);
+  }
+  // GitHub's own hosts get the default message, not "GitHub repositories only".
+  for (const none of [
+    "owner/repo", "https://github.com/owner/repo", "", "   ", "numpy scipy", "<script>", "numpy<2", "github.com", "www.github.com",
+    "https://raw.githubusercontent.com/o/r/main/uv.lock", "https://api.github.com/repos/o/r", "https://gist.github.com/u/1",
+  ]) {
+    assert.equal(inputHint(none), null, none);
   }
 });
 

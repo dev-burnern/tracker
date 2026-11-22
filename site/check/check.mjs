@@ -2,7 +2,7 @@
 // Everything shown from the repo or PyPI goes in with textContent, never as HTML.
 
 import {
-  PLATFORMS, PYTHONS, parseRepo, pickLockfile, pickRequestedFile, toQuery, fromQuery, sortPythons, freeThreaded,
+  PLATFORMS, PYTHONS, parseRepo, inputHint, pickLockfile, pickRequestedFile, toQuery, fromQuery, sortPythons, freeThreaded,
   fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown,
 } from "./check-logic.mjs";
@@ -71,11 +71,40 @@ let wheelgapVersion = null;
 const state = {
   repo: null, ref: null, root: null, plan: null, detected: null, lockfile: null, auto: false, fileNotice: null, pythons: [], platforms: [],
   result: null, fixes: null, gapWheels: null, fixesDone: false, python: null, platform: null, showAll: false, truncated: false, lab: {},
+  inputError: false,
 };
 
-function status(text, error = false) {
-  $("status").textContent = text;
+function status(content, error = false) {
+  if (Array.isArray(content)) $("status").replaceChildren(...content);
+  else $("status").textContent = content;
   $("status").classList.toggle("error", error);
+}
+
+// Shown until the next check starts: the worker's start-up progress and "Ready." lines mustn't replace it.
+function showInputError(raw) {
+  state.inputError = true;
+  const hint = inputHint(raw);
+  if (hint?.kind === "package") {
+    status([
+      `${raw.trim()} looks like a package, not a repository. `,
+      el("a", { href: `../p/${encodeURIComponent(hint.name)}/` }, "See its wheel coverage"),
+      ", or ",
+      el("a", { href: "../" }, "search packages"),
+      ".",
+    ], true);
+    return;
+  }
+  if (hint?.kind === "other-host") {
+    status([
+      "This page reads public GitHub repositories only. For a GitLab or other checkout, run ",
+      el("code", { text: "uvx wheelgap" }),
+      " in it (",
+      el("a", { href: "https://github.com/wheelgap/wheelgap/blob/main/docs/getting-started.md", rel: "noopener" }, "getting started"),
+      ").",
+    ], true);
+    return;
+  }
+  status("That doesn't look like a GitHub repository. Try owner/name or a github.com URL.", true);
 }
 
 // Re-rendering replaces buttons; this puts keyboard focus back on the one with the same data-key.
@@ -97,12 +126,12 @@ worker.onmessageerror = () => workerFailed("The checker sent something the page 
 
 worker.onmessage = ({ data }) => {
   if (data.type === "progress") {
-    if (data.id === undefined || data.id === seq) status(STAGES[data.stage] || "Working…"); // not a dropped request's
+    if (data.id === undefined ? !state.inputError : data.id === seq) status(STAGES[data.stage] || "Working…"); // not a dropped request's
     return;
   }
   if (data.type === "ready") {
     wheelgapVersion = data.wheelgap;
-    if (!state.repo) status(`Ready. wheelgap ${data.wheelgap} is running in your browser.`);
+    if (!state.repo && !state.inputError) status(`Ready. wheelgap ${data.wheelgap} is running in your browser.`);
     return;
   }
   if (data.id !== undefined && data.id !== seq) return; // an answer to a request the page has moved on from
@@ -130,6 +159,7 @@ worker.onmessage = ({ data }) => {
 };
 
 function start(repo, query = null) {
+  state.inputError = false;
   state.repo = repo;
   state.query = query;
   state.result = null;
@@ -462,9 +492,12 @@ $("form").addEventListener("submit", (e) => {
   const at = text.match(/^([^\s@]+\/[^\s@]+)@([A-Za-z0-9._\/-]+)$/); // owner/name@ref
   if (at) [, text, ref] = at;
   const repo = parseRepo(text);
-  if (!repo) return status("That doesn't look like a GitHub repository. Try owner/name or a github.com URL.", true);
+  if (!repo) return showInputError(text);
   if (ref) {
-    if (!validRef(ref)) return status("That branch or tag name isn't one this page can read.", true);
+    if (!validRef(ref)) {
+      state.inputError = true; // like showInputError(): start-up progress mustn't replace it
+      return status("That branch or tag name isn't one this page can read.", true);
+    }
     repo.ref = ref;
   }
   start(repo);
@@ -473,3 +506,10 @@ for (const b of document.querySelectorAll("[data-repo]")) b.addEventListener("cl
 
 const initial = fromQuery(location.search);
 if (initial) start(initial.repo, initial);
+else {
+  const rawRepo = new URLSearchParams(location.search).get("repo");
+  if (rawRepo) {
+    $("repo").value = rawRepo;
+    showInputError(rawRepo);
+  }
+}
