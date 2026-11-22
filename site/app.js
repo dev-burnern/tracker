@@ -208,7 +208,7 @@ function renderWeekSummary(changes, drops) {
   el.hidden = false;
   el.textContent = "";
   if (s.gainedPackages === 0 && s.droppedPackages === 0) {
-    el.textContent = "No wheel changes in the last 7 days.";
+    el.textContent = "No wheels gained or platforms dropped in the last 7 days.";
     return;
   }
   const parts = ["This week: "];

@@ -308,16 +308,47 @@ function weekSummary(changes, drops, today, ranks = null) {
     return diff >= 0 && diff < 7;
   };
 
-  const gainedPackages = new Set();
+  // Names are compared as PyPI does (and as the new/ and drops/ pages do), so "Foo_Bar" and "foo-bar" are one package.
+  const canonical = (name) => name.toLowerCase().replace(/[-_.]+/g, "-");
+
+  // Like new/ (filter_undo_gains in scripts/build_new_wheels.py), a gain that only undoes a loss of the same package,
+  // version and target in the 7 days before it is left out: a release whose wheels were still uploading. Losses are
+  // read from every night, not just this week's, since a loss just before the window can cancel a gain inside it.
+  const nights = (Array.isArray(changes) ? changes : [])
+    .filter((n) => n && typeof n === "object" && parseIsoDay(n.date) !== null)
+    .sort((a, b) => parseIsoDay(a.date) - parseIsoDay(b.date));
+  const losses = [];
+  for (const night of nights) {
+    if (!Array.isArray(night.lost)) continue;
+    for (const l of night.lost) {
+      if (!l || typeof l !== "object" || typeof l.name !== "string" || l.version == null || typeof l.target !== "string") continue;
+      losses.push({ name: canonical(l.name), version: String(l.version), target: l.target, ms: parseIsoDay(night.date) });
+    }
+  }
+
+  const gainedPackages = new Map(); // canonical name -> the name as the scan spelled it
   const gainedPairs = new Set();
-  if (Array.isArray(changes)) {
-    for (const night of changes) {
-      if (!night || typeof night !== "object" || !inWindow(night.date) || !Array.isArray(night.gained)) continue;
-      for (const item of night.gained) {
-        if (!item || typeof item !== "object" || typeof item.name !== "string" || !item.name || typeof item.target !== "string" || !item.target) continue;
-        gainedPackages.add(item.name);
-        gainedPairs.add(`${item.name}\0${item.target}`);
+  for (const night of nights) {
+    if (!Array.isArray(night.gained)) continue;
+    const gMs = parseIsoDay(night.date);
+    for (const item of night.gained) {
+      if (!item || typeof item !== "object" || typeof item.name !== "string" || !item.name || typeof item.target !== "string" || !item.target) continue;
+      const key = canonical(item.name);
+      if (item.version != null) {
+        const version = String(item.version);
+        let matched = -1;
+        losses.forEach((l, i) => {
+          const days = (gMs - l.ms) / 86400000;
+          if (l.name === key && l.version === version && l.target === item.target && days >= 0 && days <= 7) matched = i;
+        });
+        if (matched >= 0) {
+          losses.splice(matched, 1);
+          continue;
+        }
       }
+      if (!inWindow(night.date)) continue;
+      if (!gainedPackages.has(key)) gainedPackages.set(key, item.name);
+      gainedPairs.add(`${key}\0${item.target}`);
     }
   }
 
@@ -325,24 +356,25 @@ function weekSummary(changes, drops, today, ranks = null) {
   const dropList = Array.isArray(drops) ? drops : (drops && typeof drops === "object" && Array.isArray(drops.drops) ? drops.drops : []);
   for (const item of dropList) {
     if (!item || typeof item !== "object" || !inWindow(item.date) || typeof item.name !== "string" || !item.name) continue;
-    droppedPackages.add(item.name);
+    droppedPackages.add(canonical(item.name));
   }
 
   const rankMap = new Map();
   if (Array.isArray(ranks)) {
     for (const p of ranks) {
-      if (p && typeof p === "object" && typeof p.name === "string" && typeof p.rank === "number") rankMap.set(p.name, p.rank);
+      if (p && typeof p === "object" && typeof p.name === "string" && typeof p.rank === "number") rankMap.set(canonical(p.name), p.rank);
     }
   } else if (ranks instanceof Map) {
-    for (const [k, v] of ranks) rankMap.set(k, v);
+    for (const [k, v] of ranks) if (typeof k === "string") rankMap.set(canonical(k), v);
   } else if (ranks && typeof ranks === "object") {
-    for (const [k, v] of Object.entries(ranks)) if (typeof v === "number") rankMap.set(k, v);
+    for (const [k, v] of Object.entries(ranks)) if (typeof v === "number") rankMap.set(canonical(k), v);
   }
 
-  const rankOf = (name) => (rankMap.has(name) ? rankMap.get(name) : Infinity);
-  const topGained = [...gainedPackages]
+  const rankOf = (key) => (rankMap.has(key) ? rankMap.get(key) : Infinity);
+  const topGained = [...gainedPackages.keys()]
     .sort((a, b) => rankOf(a) - rankOf(b) || a.localeCompare(b))
-    .slice(0, 3);
+    .slice(0, 3)
+    .map((key) => gainedPackages.get(key));
 
   return {
     gainedPackages: gainedPackages.size,

@@ -450,3 +450,42 @@ test("weekSummary counts gains and drops in the 7-day window, deduplicates packa
     topGained: [],
   });
 });
+
+test("weekSummary leaves out gains that only undo a recent loss, as the new/ page does, and merges name spellings", () => {
+  const changes = [
+    // Lost before the window opens, regained inside it: the gain only undoes the loss.
+    { date: "2026-11-13", gained: [], lost: [{ name: "chdb-core", version: "26.11.1", target: "3.14 linux-x86_64" }] },
+    // Lost and regained inside the window: also left out. A different target is a real gain.
+    { date: "2026-11-16", gained: [], lost: [{ name: "faiss-cpu", version: "1.9.0", target: "3.14 win-amd64" }] },
+    {
+      date: "2026-11-17",
+      gained: [
+        { name: "chdb_core", version: "26.11.1", target: "3.14 linux-x86_64" },
+        { name: "faiss-cpu", version: "1.9.0", target: "3.14 win-amd64" },
+        { name: "faiss-cpu", version: "1.9.0", target: "3.14 win-arm64" },
+        // Same package, a new version: not an undo.
+        { name: "Foo.Bar", version: "2.0", target: "3.15 win-amd64" },
+      ],
+    },
+    // A second spelling of the same package on another night counts once, keeping the first spelling.
+    { date: "2026-11-18", gained: [{ name: "foo_bar", version: "2.0", target: "3.15 linux-x86_64" }], lost: [] },
+    // A loss more than 7 days before the gain doesn't cancel it.
+    { date: "2026-11-01", gained: [], lost: [{ name: "late", version: "1.0", target: "3.14 linux-x86_64" }] },
+    { date: "2026-11-19", gained: [{ name: "late", version: "1.0", target: "3.14 linux-x86_64" }] },
+  ];
+  assert.deepEqual(logic.weekSummary(changes, { schema: 1, drops: [] }, "2026-11-21", [{ name: "foo-bar", rank: 5 }]), {
+    gainedPackages: 3,
+    gainedPairs: 4,
+    droppedPackages: 0,
+    // Ranked first, then packages missing from the scan by name.
+    topGained: ["Foo.Bar", "faiss-cpu", "late"],
+  });
+
+  // One loss cancels only one gain: a second regain of the same wheel still counts.
+  const twice = [
+    { date: "2026-11-16", gained: [], lost: [{ name: "x", version: "1", target: "t" }] },
+    { date: "2026-11-17", gained: [{ name: "x", version: "1", target: "t" }] },
+    { date: "2026-11-18", gained: [{ name: "x", version: "1", target: "t" }] },
+  ];
+  assert.equal(logic.weekSummary(twice, { schema: 1, drops: [] }, "2026-11-21").gainedPackages, 1);
+});

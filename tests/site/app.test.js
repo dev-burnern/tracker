@@ -1451,7 +1451,7 @@ test("renderWeekSummary builds links, handles an empty week, and keeps '<' as pl
 
   const run = (changes, drops, packages = [], generated = "2026-11-21T00:00:00Z") => {
     const el = {
-      hidden: true,
+      hidden: false,
       textContent: "",
       nodes: [],
       append(...items) { this.nodes.push(...items); },
@@ -1486,10 +1486,10 @@ test("renderWeekSummary builds links, handles an empty week, and keeps '<' as pl
   const fullText = active.nodes.map((n) => (typeof n === "string" ? n : n.textContent)).join("");
   assert.equal(fullText, "This week: 4 packages gained a wheel (numpy, a<b and x among them) and 1 dropped a platform.");
 
-  // Empty week: shown with "No wheel changes in the last 7 days."
+  // Empty week: shown with "No wheels gained or platforms dropped in the last 7 days."
   const empty = run([{ date: "2026-11-01", gained: [{ name: "old", target: "3.15 win-amd64" }] }], { schema: 1, drops: [] });
   assert.equal(empty.hidden, false);
-  assert.equal(empty.textContent, "No wheel changes in the last 7 days.");
+  assert.equal(empty.textContent, "No wheels gained or platforms dropped in the last 7 days.");
 
   // Missing file: hidden.
   const missing = run(null, { schema: 1, drops: [] });
@@ -1497,7 +1497,7 @@ test("renderWeekSummary builds links, handles an empty week, and keeps '<' as pl
   const missingDrops = run([], null);
   assert.equal(missingDrops.hidden, true);
 
-  // No scan date to count from: hidden, not "No wheel changes".
+  // No scan date to count from: hidden, not "No wheels gained".
   const undated = run([{ date: "2026-11-21", gained: [{ name: "numpy", target: "3.15 win-amd64" }] }], { schema: 1, drops: [] }, [], null);
   assert.equal(undated.hidden, true);
 
@@ -1518,6 +1518,13 @@ test("renderWeekSummary builds links, handles an empty week, and keeps '<' as pl
     [{ name: "a", rank: 1 }, { name: "b", rank: 2 }, { name: "c", rank: 3 }, { name: "d", rank: 4 }],
   );
   assert.equal(text(four), "This week: 4 packages gained a wheel (a, b and c among them).");
+
+  // Two or three packages: all of them are counted, so no names.
+  const two = run(
+    [{ date: "2026-11-21", gained: ["a", "b"].map((name) => ({ name, target: "3.15 win-amd64" })) }],
+    { schema: 1, drops: [] },
+  );
+  assert.equal(text(two), "This week: 2 packages gained a wheel.");
 
   // Drops only: the count says "packages" itself.
   const dropsOnly = run([], { schema: 1, drops: [{ date: "2026-11-20", name: "databricks", target: "3.13 pyodide" }] });
