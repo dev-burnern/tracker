@@ -449,7 +449,22 @@ test("with several requirements files under other names and nothing else, the pa
   readme.loaded();
   assert.deepEqual(readme.calls, [["choose", ["requirements/default.txt", "requirements/docs.txt"]]]);
   assert.equal(readme.state.fileNotice, "README.md isn't a file this page reads.");
-  assert.match(read("check.mjs"), /\$\("alerts"\)\.replaceChildren\(\.\.\.\(state\.fileNotice \? \[el\("p", \{ class: "alert warn", text: `\$\{state\.fileNotice\} Pick a file to check instead\.` \}\)\] : \[\]\)\);/);
+  // chooseFile() itself: the named-file notice first, then (when the repo names its PyPI package) the --deps command.
+  const chooseSrc = read("check.mjs").match(/^function chooseFile\(.*?^}$/ms)[0];
+  const shown = new Map();
+  const box = (id) => (shown.has(id) ? shown.get(id) : shown.set(id, { hidden: true, textContent: "", replaceChildren(...kids) { this.children = kids; } }).get(id));
+  const chooseWith = (st) => new Function(
+    "state", "$", "el", "status", "packageCliCommand", "renderSetup", "hideResultSections", `${chooseSrc}; return chooseFile;`,
+  )(st, box, (tag, attrs = {}, ...kids) => ({ tag, attrs, kids }), () => {}, checkLogic.packageCliCommand, () => {}, () => {});
+  const files = [{ path: "requirements/base.txt" }, { path: "requirements/docs.txt" }];
+  chooseWith({ repo: { owner: "o", name: "r" }, fileNotice: "README.md isn't a file this page reads.", projectName: "httpie", pythons: ["3.14"], platforms: ["linux-x86_64"] })(files);
+  const alerts = box("alerts").children;
+  assert.equal(alerts.length, 2);
+  assert.deepEqual(alerts[0], { tag: "p", attrs: { class: "alert warn", text: "README.md isn't a file this page reads. Pick a file to check instead." }, kids: [] });
+  assert.equal(alerts[1].kids[0], "Or check the published package httpie's dependencies: ");
+  assert.deepEqual(alerts[1].kids[1], { tag: "code", attrs: { text: "uvx wheelgap --deps httpie -p 3.14 -t linux-x86_64" }, kids: [] });
+  chooseWith({ repo: { owner: "o", name: "r" }, fileNotice: null, projectName: null, pythons: ["3.14"], platforms: ["linux-x86_64"] })(files);
+  assert.deepEqual(box("alerts").children, []);
   const nested = pickPage([...celery.slice(1), { path: "backend/uv.lock", offline: true }]);
   nested.loaded();
   assert.deepEqual(nested.calls, [["runCheck", "backend/uv.lock"]]);
