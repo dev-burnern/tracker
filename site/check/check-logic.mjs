@@ -92,14 +92,31 @@ export function pickLockfile(lockfiles, dir) {
   return lockfiles.find(inDir) ?? lockfiles[0] ?? null;
 }
 
+// Words in a requirements file's name (requirements-dev.txt, requirements/test.txt) or its folders that say its
+// packages are for the tests, the docs, an example or development, not the project itself: wheelgap's _SIDE_WORDS
+// (src/wheelgap/sources.py on main, after 0.13.0), split the way its _is_side() splits a name.
+const SIDE_WORDS = new Set([
+  "test", "tests", "testing", "example", "examples", "sample", "samples", "demo", "demos", "doc", "docs",
+  "bench", "benchmark", "benchmarks", "fixtures", "templates",
+  "dev", "develop", "development", "lint", "ci", "typing",
+]);
+export function isSideFile(path) {
+  const parts = String(path).split("/");
+  const base = parts.pop();
+  const stem = base.includes(".") ? base.slice(0, base.lastIndexOf(".")) : base;
+  return [...parts, stem].some((part) => part.toLowerCase().split(/[^a-z0-9]+/).some((word) => SIDE_WORDS.has(word)));
+}
+
 // The file the page checks by itself: pickLockfile()'s pick among the exactly-named files, as before; with none of
-// those, the only requirements file under another name (`other`, from plan()). With several of those it picks none
-// and returns them in `choose`: which one holds the project's dependencies can't be told from a name, so, like
-// `wheelgap DIR`, the page lists them and the visitor picks. {lock: null, choose: null} when there's nothing at all.
+// those, the only requirements file under another name (`other`, from plan()), unless its name says it's for
+// development, tests, docs or examples (isSideFile), which `wheelgap DIR` never checks on its own. With several of
+// those, or that one side file, it picks none and returns them in `choose`: which one holds the project's
+// dependencies can't be told from a name, so, like `wheelgap DIR`, the page lists them and the visitor picks.
+// {lock: null, choose: null} when there's nothing at all.
 export function autoPick(lockfiles, dir) {
   const named = lockfiles.filter((l) => !l.other);
   if (named.length) return { lock: pickLockfile(named, dir), choose: null };
-  if (lockfiles.length === 1) return { lock: lockfiles[0], choose: null };
+  if (lockfiles.length === 1 && !isSideFile(lockfiles[0].path)) return { lock: lockfiles[0], choose: null };
   return { lock: null, choose: lockfiles.length ? lockfiles : null };
 }
 

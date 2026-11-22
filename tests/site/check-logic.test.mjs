@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, autoPick, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, rawUrl, pickLockfile, autoPick, isSideFile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -125,6 +125,19 @@ test("autoPick keeps the exactly-named files' pick, checks a lone other requirem
   assert.deepEqual(autoPick(several, null), { lock: null, choose: several });
   assert.deepEqual(autoPick(several, "requirements"), { lock: null, choose: several });
   assert.deepEqual(autoPick([], null), { lock: null, choose: null });
+});
+
+test("a lone requirements file named for development, tests, docs or examples is offered, never checked on its own", () => {
+  // As `wheelgap DIR` on main (_is_side): it lists such a file and never checks it by itself.
+  const other = (path) => ({ path, offline: false, other: true });
+  for (const path of ["requirements-dev.txt", "requirements/test.txt", "requirements_docs.txt", "requirements/ci.txt", "examples/requirements-prod.txt", "requirements-Typing.txt"]) {
+    assert.deepEqual(autoPick([other(path)], null), { lock: null, choose: [other(path)] }, path);
+  }
+  for (const path of ["requirements/base.txt", "requirements-prod.txt", "requirements/local.txt", "requirements-devices.txt", "requirements/latest.txt"]) {
+    assert.equal(autoPick([other(path)], null).lock?.path, path, path);
+  }
+  assert.equal(isSideFile("requirements-dev.txt"), true);
+  assert.equal(isSideFile("requirements/base.txt"), false);
 });
 
 test("a file with nothing to check is no answer; one whose packages were skipped or aren't installed is", () => {

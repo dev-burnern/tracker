@@ -329,6 +329,11 @@ test("with several requirements files under other names and nothing else, the pa
   const one = pickPage(celery.slice(1, 2));
   one.loaded();
   assert.deepEqual(one.calls, [["runCheck", "requirements/default.txt"]]);
+  // But a lone one named for development is offered, not checked.
+  const dev = pickPage([{ path: "requirements-dev.txt", offline: false, other: true }]);
+  dev.loaded();
+  assert.deepEqual(dev.calls, [["choose", ["requirements-dev.txt"]]]);
+  assert.match(read("check.mjs"), /\$\("lock-pick"\)\.hidden = locks\.length < 2 && Boolean\(state\.lockfile\);/);
   const named = pickPage(celery.slice(1), { query: { lockfile: "requirements/docs.txt" } });
   named.loaded();
   assert.deepEqual(named.calls, [["runCheck", "requirements/docs.txt"]]);

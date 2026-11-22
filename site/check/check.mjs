@@ -219,7 +219,9 @@ function chooseFile(files) {
   const names = files.map((l) => l.path);
   const some = `${names.slice(0, 8).join(", ")}${names.length > 8 ? `, and ${names.length - 8} more` : ""}`;
   $("verdict").textContent = "Pick the file to check";
-  $("verdict-detail").textContent = `${state.repo.owner}/${state.repo.name} has no lockfile the page reads by itself, but ${names.length} requirements files: ${some}. Which one holds the project's dependencies can't be told from its name, so pick it under "Lockfile" below.`;
+  $("verdict-detail").textContent = names.length === 1
+    ? `${state.repo.owner}/${state.repo.name} has no lockfile the page reads by itself, only ${names[0]}, which by its name is for development, tests, docs or examples, so it isn't checked on its own. To check it anyway, pick it under "Lockfile" below.`
+    : `${state.repo.owner}/${state.repo.name} has no lockfile the page reads by itself, but ${names.length} requirements files: ${some}. Which one holds the project's dependencies can't be told from its name, so pick it under "Lockfile" below.`;
   $("alerts").replaceChildren();
   renderSetup();
   hideResultSections(true, true);
@@ -341,7 +343,7 @@ function renderSetup() {
   }
 
   const locks = state.plan.lockfiles;
-  $("lock-pick").hidden = locks.length < 2;
+  $("lock-pick").hidden = locks.length < 2 && Boolean(state.lockfile); // a chooser has a picker, even for one file
   $("lockfile").replaceChildren(
     ...(state.lockfile ? [] : [el("option", { value: "", disabled: true, selected: true, text: "Choose a file…" })]),
     ...locks.map((l) => el("option", { value: l.path, selected: l.path === state.lockfile, text: l.offline ? l.path : `${l.path} (looks packages up on PyPI)` })),
