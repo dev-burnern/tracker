@@ -394,3 +394,59 @@ test("blockersForTarget rejects malformed entries and unsafe names (#93)", () =>
   assert.equal(blockers[0].count, 5);
   assert.deepEqual(blockers[0].examples, ["valid-dep"]);
 });
+
+test("weekSummary counts gains and drops in the 7-day window, deduplicates packages, and skips malformed entries", () => {
+  const changes = [
+    // Older than 7 days (diff = 7 from 2026-11-21 -> excluded)
+    { date: "2026-11-14", gained: [{ name: "oldpkg", target: "3.15 linux-x86_64" }] },
+    // Window edge (diff = 6 from 2026-11-21 -> included)
+    { date: "2026-11-15", gained: [{ name: "lxml", target: "3.15 win-amd64" }] },
+    // Same package on multiple targets counts once for gainedPackages, twice for gainedPairs
+    {
+      date: "2026-11-21",
+      gained: [
+        { name: "numpy", target: "3.15 win-amd64" },
+        { name: "numpy", target: "3.15 win-arm64" },
+        { name: "grpcio", target: "3.15 linux-x86_64" },
+        { name: "lowrank", target: "3.15 linux-x86_64" },
+        null,
+        { name: "", target: "3.15 linux-x86_64" },
+        { name: "notarget" },
+      ],
+    },
+    null,
+    { date: "not-a-date", gained: [{ name: "bad", target: "3.15 linux-x86_64" }] },
+  ];
+  const drops = {
+    schema: 1,
+    drops: [
+      { date: "2026-11-14", name: "olddrop", target: "3.13 pyodide" },
+      { date: "2026-11-15", name: "edge-drop", target: "3.13 pyodide" },
+      { date: "2026-11-20", name: "databricks", target: "3.13 pyodide" },
+      { date: "2026-11-20", name: "databricks", target: "3.14 pyodide" },
+      null,
+      { date: "2026-11-20", name: "" },
+    ],
+  };
+  const ranks = [
+    { name: "numpy", rank: 1 },
+    { name: "grpcio", rank: 12 },
+    { name: "lxml", rank: 40 },
+    { name: "lowrank", rank: 900 },
+  ];
+
+  assert.deepEqual(logic.weekSummary(changes, drops, "2026-11-21", ranks), {
+    gainedPackages: 4,
+    gainedPairs: 5,
+    droppedPackages: 2,
+    topGained: ["numpy", "grpcio", "lxml"],
+  });
+
+  // Empty window
+  assert.deepEqual(logic.weekSummary(changes, drops, "2026-12-10", ranks), {
+    gainedPackages: 0,
+    gainedPairs: 0,
+    droppedPackages: 0,
+    topGained: [],
+  });
+});

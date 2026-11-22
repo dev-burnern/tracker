@@ -191,6 +191,48 @@ function renderAgreement(a, now = Date.now()) {
   el.append(link);
 }
 
+function renderWeekSummary(changes, drops) {
+  const el = $("week-summary");
+  if (!el) return;
+  if (!Array.isArray(changes) || !drops || typeof drops !== "object" || !Array.isArray(drops.drops)) {
+    el.hidden = true;
+    return;
+  }
+  const today = typeof state.data?.generated === "string" ? state.data.generated.slice(0, 10) : "";
+  const s = weekSummary(changes, drops, today, state.data?.packages);
+  el.hidden = false;
+  el.textContent = "";
+  if (s.gainedPackages === 0 && s.droppedPackages === 0) {
+    el.textContent = "No wheel changes in the last 7 days.";
+    return;
+  }
+  const parts = ["This week: "];
+  if (s.gainedPackages > 0) {
+    parts.push(`${fmt(s.gainedPackages)} ${s.gainedPackages === 1 ? "package" : "packages"} `);
+    const newLink = document.createElement("a");
+    newLink.href = "new/";
+    newLink.textContent = "gained a wheel";
+    parts.push(newLink);
+    if (s.topGained.length) {
+      const names = s.topGained.length === 1
+        ? s.topGained[0]
+        : `${s.topGained.slice(0, -1).join(", ")} and ${s.topGained[s.topGained.length - 1]}`;
+      parts.push(` (${names} among them)`);
+    }
+  }
+  if (s.gainedPackages > 0 && s.droppedPackages > 0) parts.push(" and ");
+  if (s.droppedPackages > 0) {
+    const noun = s.gainedPackages === 0 ? (s.droppedPackages === 1 ? " package " : " packages ") : " ";
+    parts.push(`${fmt(s.droppedPackages)}${noun}`);
+    const dropLink = document.createElement("a");
+    dropLink.href = "drops/";
+    dropLink.textContent = "dropped a platform";
+    parts.push(dropLink);
+  }
+  parts.push(".");
+  el.append(...parts);
+}
+
 // The Python selector is a radio group (#163): one tab stop, on the selected Python, and arrow keys move the
 // choice, like the status pills (#146).
 function renderTabs() {
@@ -1418,13 +1460,14 @@ function initTheme() {
 async function main() {
   initTheme();
 
-  const [data, hist, pyodide, agreement, changes, blockers] = await Promise.all([
+  const [data, hist, pyodide, agreement, changes, blockers, drops] = await Promise.all([
     fetch("data/coverage.json").then((r) => r.json()),
     fetch("data/history.json").then((r) => (r.ok ? r.json() : [])).catch(() => []),
     fetch("data/pyodide.json").then((r) => (r.ok ? r.json() : null)).catch(() => null),
     fetch("data/agreement.json").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    fetch("data/changes.json").then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    fetch("data/changes.json").then((r) => (r.ok ? r.json() : null)).catch(() => null),
     fetch("data/blockers.json").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    fetch("data/drops.json").then((r) => (r.ok ? r.json() : null)).catch(() => null),
   ]);
 
   state.data = data;
@@ -1440,6 +1483,7 @@ async function main() {
 
   renderKPIs();
   renderMeta();
+  renderWeekSummary(changes, drops);
   renderAgreement(agreement);
   renderAll();
   if (pkg) renderLookup(pkg);

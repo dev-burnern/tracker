@@ -284,9 +284,77 @@ function labVerdict(r) {
   return { kind: "works", text: `builds from source in ${mins(r.seconds)} and imports${r.gil === "kept-off" ? ", GIL stays off" : ""}` };
 }
 
+function parseIsoDay(s) {
+  if (typeof s !== "string") return null;
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const d = new Date(ms);
+  if (d.getUTCFullYear() !== Number(m[1]) || d.getUTCMonth() !== Number(m[2]) - 1 || d.getUTCDate() !== Number(m[3])) {
+    return null;
+  }
+  return ms;
+}
+
+// Counts wheel gains (packages & package-target pairs), platform drops (packages), and top 3 ranked gaining packages
+// over the 7-day window ending on `today` (YYYY-MM-DD, inclusive of `today` and the 6 preceding days).
+function weekSummary(changes, drops, today, ranks = null) {
+  const endMs = parseIsoDay(today);
+  const inWindow = (dateStr) => {
+    if (endMs === null) return false;
+    const ms = parseIsoDay(dateStr);
+    if (ms === null) return false;
+    const diff = (endMs - ms) / 86400000;
+    return diff >= 0 && diff < 7;
+  };
+
+  const gainedPackages = new Set();
+  const gainedPairs = new Set();
+  if (Array.isArray(changes)) {
+    for (const night of changes) {
+      if (!night || typeof night !== "object" || !inWindow(night.date) || !Array.isArray(night.gained)) continue;
+      for (const item of night.gained) {
+        if (!item || typeof item !== "object" || typeof item.name !== "string" || !item.name || typeof item.target !== "string" || !item.target) continue;
+        gainedPackages.add(item.name);
+        gainedPairs.add(`${item.name}\0${item.target}`);
+      }
+    }
+  }
+
+  const droppedPackages = new Set();
+  const dropList = Array.isArray(drops) ? drops : (drops && typeof drops === "object" && Array.isArray(drops.drops) ? drops.drops : []);
+  for (const item of dropList) {
+    if (!item || typeof item !== "object" || !inWindow(item.date) || typeof item.name !== "string" || !item.name) continue;
+    droppedPackages.add(item.name);
+  }
+
+  const rankMap = new Map();
+  if (Array.isArray(ranks)) {
+    for (const p of ranks) {
+      if (p && typeof p === "object" && typeof p.name === "string" && typeof p.rank === "number") rankMap.set(p.name, p.rank);
+    }
+  } else if (ranks instanceof Map) {
+    for (const [k, v] of ranks) rankMap.set(k, v);
+  } else if (ranks && typeof ranks === "object") {
+    for (const [k, v] of Object.entries(ranks)) if (typeof v === "number") rankMap.set(k, v);
+  }
+
+  const rankOf = (name) => (rankMap.has(name) ? rankMap.get(name) : Infinity);
+  const topGained = [...gainedPackages]
+    .sort((a, b) => rankOf(a) - rankOf(b) || a.localeCompare(b))
+    .slice(0, 3);
+
+  return {
+    gainedPackages: gainedPackages.size,
+    gainedPairs: gainedPairs.size,
+    droppedPackages: droppedPackages.size,
+    topGained,
+  };
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     BUNDLED_NOTE, isPackageName, isPackageSpec, splitSpec, installable, gapsAt, platformStats, chartSeries, pyodideReleases, bundledInfo, bundledDetail, lookupInstallData, gapWheelTargets, blockersLabel, blockersForTarget, whyCommand, pyodideFooter,
-    labVerdict,
+    labVerdict, weekSummary,
   };
 }
