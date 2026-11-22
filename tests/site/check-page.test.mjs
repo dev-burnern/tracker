@@ -278,7 +278,16 @@ test("the badge is a small static image on the page's own origin, offered as Mar
 
   const page = read("check.mjs");
   // Filled in as text, from the pure helper, and copied the way the other buttons copy.
-  assert.match(page, /\$\("badge-md"\)\.textContent = badgeMarkdown\(state\.repo, r\.lockfile, pickLockfile\(state\.plan\.lockfiles, null\)\?\.path \?\? null\);/);
+  // The default is what a visit with the repo alone would pick: from the repo's own files, never one a blob link or
+  // ?lock= added (`added`), so the link keeps lock= for that file.
+  assert.match(page, /\$\("badge-md"\)\.textContent = badgeMarkdown\(state\.repo, r\.lockfile, pickLockfile\(state\.plan\.lockfiles\.filter\(\(l\) => !l\.added\), null\)\?\.path \?\? null\);/);
+  const repoFiles = [{ path: "pyproject.toml", offline: false }];
+  const added = { path: "requirements/default.txt", offline: false, added: true };
+  const defaultOf = (lockfiles) => checkLogic.pickLockfile(lockfiles.filter((l) => !l.added), null)?.path ?? null;
+  const repo = { owner: "celery", name: "celery" };
+  assert.match(checkLogic.badgeMarkdown(repo, added.path, defaultOf([...repoFiles, added])), /\?repo=celery\/celery&lock=requirements\/default\.txt\)$/);
+  assert.match(checkLogic.badgeMarkdown(repo, added.path, defaultOf([added])), /&lock=requirements\/default\.txt\)$/); // its only file
+  assert.match(checkLogic.badgeMarkdown(repo, "pyproject.toml", defaultOf([...repoFiles, added])), /\?repo=celery\/celery\)$/);
   assert.match(page, /\$\("copy-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.doesNotMatch(page, /innerHTML/);
 });
