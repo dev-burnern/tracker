@@ -337,5 +337,13 @@ test("with several requirements files under other names and nothing else, the pa
   nested.loaded();
   assert.deepEqual(nested.calls, [["runCheck", "backend/uv.lock"]]);
   assert.match(read("check.mjs"), /state\.lockfile \? \[\] : \[el\("option", \{ value: "", disabled: true, selected: true, text: "Choose a file…" \}\)\]/);
+  // While nothing is picked, a platform or Python chip only redraws the setup: there's no file to check yet.
+  const run = read("check.mjs").match(/^function runCheck\(\) \{.*?^}$/ms)[0];
+  const drawn = [];
+  const runCheck = new Function("state", "renderSetup", "keepFocus", "worker", `${run}; return runCheck;`)(
+    { lockfile: null }, () => drawn.push("setup"), (fn) => fn(), { postMessage: () => drawn.push("posted") },
+  );
+  runCheck();
+  assert.deepEqual(drawn, ["setup"]);
 });
 

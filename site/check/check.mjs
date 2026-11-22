@@ -161,6 +161,8 @@ function onLoaded({ plan, detected, truncated, ref, root }) {
 }
 
 function runCheck() {
+  // No file picked yet (chooseFile()): a platform or Python chip changes the selection, and the check waits for one.
+  if (!state.lockfile) return keepFocus(renderSetup);
   state.fixes = null;
   state.fixesDone = false;
   state.showAll = false;
