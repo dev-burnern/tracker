@@ -2,7 +2,7 @@
 // Everything shown from the repo or PyPI goes in with textContent, never as HTML.
 
 import {
-  PLATFORMS, PYTHONS, parseRepo, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded,
+  PLATFORMS, PYTHONS, parseRepo, pickLockfile, pickRequestedFile, toQuery, fromQuery, sortPythons, freeThreaded,
   fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown,
 } from "./check-logic.mjs";
@@ -69,7 +69,7 @@ const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "mod
 let seq = 0;
 let wheelgapVersion = null;
 const state = {
-  repo: null, ref: null, root: null, plan: null, detected: null, lockfile: null, auto: false, pythons: [], platforms: [],
+  repo: null, ref: null, root: null, plan: null, detected: null, lockfile: null, auto: false, fileNotice: null, pythons: [], platforms: [],
   result: null, fixes: null, gapWheels: null, fixesDone: false, python: null, platform: null, showAll: false, truncated: false, lab: {},
 };
 
@@ -133,19 +133,23 @@ function start(repo, query = null) {
   state.repo = repo;
   state.query = query;
   state.result = null;
+  state.fileNotice = null;
   $("out").hidden = true;
   $("go").disabled = true;
   $("repo").value = `${repo.owner}/${repo.name}${repo.ref ? `@${repo.ref}` : ""}`;
   status(wheelgapVersion ? STAGES.tree : STAGES.python);
-  worker.postMessage({ id: ++seq, type: "load", repo });
+  worker.postMessage({ id: ++seq, type: "load", repo, file: query?.lockfile || repo.file || null });
 }
 
-function onLoaded({ plan, detected, truncated, ref, root }) {
+function onLoaded({ plan, detected, truncated, ref, root, fileInTree }) {
   Object.assign(state, { plan, detected, truncated, ref, root });
   const q = state.query;
-  const named = q?.lockfile && plan.lockfiles.find((l) => l.path === q.lockfile);
-  const lock = named || pickLockfile(plan.lockfiles, state.repo.dir);
-  state.auto = !named; // the page's own pick, not one a link or the visitor named
+  const requested = q?.lockfile || state.repo.file || null;
+  const picked = pickRequestedFile(plan.lockfiles, requested, Boolean(fileInTree), state.repo.dir);
+  plan.lockfiles = picked.lockfiles;
+  const lock = picked.lock;
+  state.auto = picked.auto; // the page's own pick, not one a link or the visitor named
+  state.fileNotice = picked.notice;
   if (!lock) {
     status("");
     $("go").disabled = false;
@@ -206,7 +210,8 @@ function onResult(result) {
 function noLockfile() {
   $("out").hidden = false;
   $("verdict").textContent = "No lockfile found";
-  $("verdict-detail").textContent = `The repo check reads a uv.lock, poetry.lock, pdm.lock, pylock.toml, Pipfile.lock, requirements.txt, pixi.lock or pyproject.toml, and ${state.repo.owner}/${state.repo.name} has none${state.truncated ? " in the part of its file list GitHub returned" : ""}. Run uvx wheelgap in a checkout for anything else.`;
+  const prefix = state.fileNotice ? `${state.fileNotice} ` : "";
+  $("verdict-detail").textContent = `${prefix}The repo check reads a uv.lock, poetry.lock, pdm.lock, pylock.toml, Pipfile.lock, requirements.txt, pixi.lock or pyproject.toml, and ${state.repo.owner}/${state.repo.name} has none${state.truncated ? " in the part of its file list GitHub returned" : ""}. Run uvx wheelgap in a checkout for anything else.`;
   for (const id of ["alerts"]) $(id).replaceChildren();
   hideResultSections(true);
 }
@@ -258,6 +263,9 @@ function renderVerdict() {
   })));
   $("verdict-detail").textContent = `${repoName} · ${r.lockfile}${state.ref && state.ref !== "HEAD" ? ` at ${state.ref}` : ""} · Python ${sortPythons(state.pythons).join(", ")} on ${state.platforms.length} platform${state.platforms.length === 1 ? "" : "s"}`;
   const alerts = [];
+  if (state.fileNotice) {
+    alerts.push(el("p", { class: "alert warn", text: state.fileNotice }));
+  }
   if (r.outside_lock.length) {
     alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} only allows Python ${r.requires_python}, so it has no wheels for ${r.outside_lock.join(", ")} and those aren't counted. Widening requires-python and re-locking is the first step there.` }));
   }
@@ -321,7 +329,7 @@ function renderSetup() {
   const locks = state.plan.lockfiles;
   $("lock-pick").hidden = locks.length < 2;
   $("lockfile").replaceChildren(...locks.map((l) => el("option", { value: l.path, selected: l.path === state.lockfile, text: l.offline ? l.path : `${l.path} (looks packages up on PyPI)` })));
-  $("lockfile").onchange = () => { state.lockfile = $("lockfile").value; state.auto = false; runCheck(); };
+  $("lockfile").onchange = () => { state.lockfile = $("lockfile").value; state.auto = false; state.fileNotice = null; runCheck(); };
 
   const repoUrl = `https://github.com/${state.repo.owner}/${state.repo.name}/blob/${encodeURIComponent(state.ref || "HEAD")}/`;
   const link = (path, line) => el("a", { href: `${repoUrl}${path.split("/").map(encodeURIComponent).join("/")}${line ? `#L${line}` : ""}`, rel: "noopener" }, el("code", { text: `${path}${line ? `:${line}` : ""}` }));

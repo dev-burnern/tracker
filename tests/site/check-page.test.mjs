@@ -282,3 +282,70 @@ test("the badge is a small static image on the page's own origin, offered as Mar
   assert.match(page, /\$\("copy-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.doesNotMatch(page, /innerHTML/);
 });
+
+test("a blob link checks the named file when readable, or announces the fallback when not", () => {
+  const source = read("check.mjs");
+  const fn = source.match(/^function onLoaded\(.*?^}$/ms);
+  assert.ok(fn, "onLoaded is in check.mjs");
+
+  const runOnLoaded = ({ repo, lockfiles, fileInTree, query = null }) => {
+    const state = { repo, query };
+    let ran = 0;
+    const onLoaded = new Function(
+      "state", "pickRequestedFile", "sortPythons", "NAMES", "status", "$", "noLockfile", "runCheck",
+      `${fn[0]}; return onLoaded;`,
+    )(
+      state,
+      checkLogic.pickRequestedFile,
+      checkLogic.sortPythons,
+      Object.fromEntries(checkLogic.PLATFORMS),
+      () => {},
+      () => ({ disabled: false }),
+      () => {},
+      () => { ran++; },
+    );
+    onLoaded({
+      plan: { lockfiles: [...lockfiles] },
+      detected: { pythons: ["3.13"], platforms: ["linux-x86_64"] },
+      truncated: false,
+      ref: "main",
+      root: "/repos/1",
+      fileInTree,
+    });
+    return { state, ran };
+  };
+
+  // Blob link to requirements/default.txt (unlisted, exists in tree): adds and checks it.
+  const reqs = runOnLoaded({
+    repo: checkLogic.parseRepo("https://github.com/celery/celery/blob/main/requirements/default.txt"),
+    lockfiles: [{ path: "pyproject.toml", offline: false }],
+    fileInTree: true,
+  });
+  assert.equal(reqs.ran, 1);
+  assert.equal(reqs.state.lockfile, "requirements/default.txt");
+  assert.equal(reqs.state.auto, false);
+  assert.equal(reqs.state.fileNotice, null);
+  assert.equal(reqs.state.plan.lockfiles[0].path, "requirements/default.txt");
+
+  // Blob link to listed backend/uv.lock: checks backend/uv.lock, not root uv.lock.
+  const nested = runOnLoaded({
+    repo: checkLogic.parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"),
+    lockfiles: [{ path: "uv.lock", offline: true }, { path: "backend/uv.lock", offline: true }],
+    fileInTree: true,
+  });
+  assert.equal(nested.ran, 1);
+  assert.equal(nested.state.lockfile, "backend/uv.lock");
+  assert.equal(nested.state.auto, false);
+  assert.equal(nested.state.fileNotice, null);
+
+  // Blob link to README.md: announces why it wasn't read and falls back to automatic pick.
+  const readme = runOnLoaded({
+    repo: checkLogic.parseRepo("https://github.com/o/r/blob/main/README.md"),
+    lockfiles: [{ path: "uv.lock", offline: true }],
+    fileInTree: true,
+  });
+  assert.equal(readme.ran, 1);
+  assert.equal(readme.state.lockfile, "uv.lock");
+  assert.equal(readme.state.auto, true);
+  assert.equal(readme.state.fileNotice, "README.md isn't a file this page reads. Checked uv.lock instead.");
+});

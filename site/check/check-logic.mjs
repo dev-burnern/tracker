@@ -22,8 +22,8 @@ export function validRef(ref) {
   return /^[A-Za-z0-9._\/-]{1,200}$/.test(ref) && ref.split("/").every((p) => p && p !== "." && p !== "..");
 }
 
-// "owner/name", a github.com URL (with /tree/REF/DIR or /blob/REF/FILE), or an SSH remote, to {owner, name, ref, dir}.
-// ref and dir are null when the input doesn't name them. Returns null for anything else.
+// "owner/name", a github.com URL (with /tree/REF/DIR or /blob/REF/FILE), or an SSH remote, to {owner, name, ref, dir, file}.
+// ref, dir and file are null when the input doesn't name them. Returns null for anything else.
 export function parseRepo(input) {
   let s = String(input ?? "").trim();
   if (!s || s.length > 500) return null;
@@ -37,15 +37,20 @@ export function parseRepo(input) {
   if (!NAME.test(owner) || !NAME.test(name) || owner.startsWith(".") || name === "." || name === "..") return null;
   let ref = null;
   let dir = null;
+  let file = null;
   if ((parts[2] === "tree" || parts[2] === "blob") && parts[3]) {
     ref = decodeURIComponent(parts[3]);
     const rest = parts.slice(4).map(decodeURIComponent);
-    if (parts[2] === "blob") rest.pop(); // a file: its folder
+    if (parts[2] === "blob") {
+      file = rest.length ? rest.join("/") : null;
+      rest.pop(); // a file: its folder
+    }
     dir = rest.length ? rest.join("/") : null;
   }
   if (ref !== null && !validRef(ref)) return null;
   if (dir !== null && (dir.split("/").some((p) => p === ".." || p === "") || dir.length > 300)) return null;
-  return { owner, name, ref, dir };
+  if (file !== null && (file.split("/").some((p) => p === ".." || p === "") || file.length > 300)) return null;
+  return { owner, name, ref, dir, file };
 }
 
 // The raw.githubusercontent.com URL of a file in the repo, each path segment encoded.
@@ -90,6 +95,35 @@ export function trimProject(doc) {
 export function pickLockfile(lockfiles, dir) {
   const inDir = (l) => dir !== null && l.path === `${dir}/${l.path.split("/").pop()}`;
   return lockfiles.find(inDir) ?? lockfiles[0] ?? null;
+}
+
+// Whether a file path not listed by plan() is one wheelgap reads as a requirements file (*.txt, *.in) or pyproject.toml.
+export function isReadableFile(path) {
+  const base = String(path ?? "").split("/").pop();
+  return /\.(txt|in)$/i.test(base) || base === "pyproject.toml";
+}
+
+// Pick the file to check when a link or query may have named one explicitly.
+// Returns { lock, lockfiles, auto, notice } where `lockfiles` may have the named file added when it exists in the
+// repo tree and is readable, and `notice` explains when a named file couldn't be read and the page fell back.
+export function pickRequestedFile(lockfiles, requested, inTree, dir) {
+  if (!requested) {
+    return { lock: pickLockfile(lockfiles, dir), lockfiles, auto: true, notice: null };
+  }
+  const existing = lockfiles.find((l) => l.path === requested);
+  if (existing) {
+    return { lock: existing, lockfiles, auto: false, notice: null };
+  }
+  if (inTree && isReadableFile(requested)) {
+    const added = { path: requested, offline: false };
+    return { lock: added, lockfiles: [added, ...lockfiles], auto: false, notice: null };
+  }
+  const fallback = pickLockfile(lockfiles, dir);
+  const why = !isReadableFile(requested)
+    ? `${requested} isn't a file this page reads.`
+    : `${requested} wasn't found in this repository.`;
+  const notice = fallback ? `${why} Checked ${fallback.path} instead.` : why;
+  return { lock: fallback, lockfiles, auto: true, notice };
 }
 
 // After wheelgap couldn't read `failed`: the repo's other files to pick from instead, or null to report the error.

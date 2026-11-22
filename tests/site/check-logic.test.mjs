@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, rawUrl, pickLockfile, pickRequestedFile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -52,15 +52,23 @@ test("trimming preserves malformed and missing shapes instead of inventing empty
 });
 
 test("parseRepo reads the forms people paste", () => {
-  const plain = { owner: "fastapi", name: "fastapi", ref: null, dir: null };
+  const plain = { owner: "fastapi", name: "fastapi", ref: null, dir: null, file: null };
   assert.deepEqual(parseRepo("fastapi/fastapi"), plain);
   assert.deepEqual(parseRepo("https://github.com/fastapi/fastapi"), plain);
   assert.deepEqual(parseRepo("github.com/fastapi/fastapi.git/"), plain);
   assert.deepEqual(parseRepo("git@github.com:fastapi/fastapi.git"), plain);
   assert.deepEqual(parseRepo("https://www.github.com/fastapi/fastapi?tab=readme#top"), plain);
-  assert.deepEqual(parseRepo("https://github.com/o/r/tree/dev/backend/api"), { owner: "o", name: "r", ref: "dev", dir: "backend/api" });
-  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"), { owner: "o", name: "r", ref: "main", dir: "backend" });
-  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/uv.lock"), { owner: "o", name: "r", ref: "main", dir: null });
+  assert.deepEqual(parseRepo("https://github.com/o/r/tree/dev/backend/api"), { owner: "o", name: "r", ref: "dev", dir: "backend/api", file: null });
+  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/backend/uv.lock"), { owner: "o", name: "r", ref: "main", dir: "backend", file: "backend/uv.lock" });
+  assert.deepEqual(parseRepo("https://github.com/o/r/blob/main/uv.lock"), { owner: "o", name: "r", ref: "main", dir: null, file: "uv.lock" });
+  assert.deepEqual(
+    parseRepo("https://github.com/celery/celery/blob/main/requirements/default.txt"),
+    { owner: "celery", name: "celery", ref: "main", dir: "requirements", file: "requirements/default.txt" },
+  );
+  assert.deepEqual(
+    parseRepo("https://github.com/o/r/blob/main/my%20dir/my%20reqs.txt"),
+    { owner: "o", name: "r", ref: "main", dir: "my dir", file: "my dir/my reqs.txt" },
+  );
 });
 
 test("parseRepo refuses what isn't a repo", () => {
@@ -122,7 +130,15 @@ test("a result's query round-trips, and unknown values are dropped", () => {
   const q = toQuery(state);
   assert.equal(q, "repo=o/r&ref=dev&lock=backend/uv.lock&py=3.14,3.14t&t=linux-aarch64,win-arm64");
   const back = fromQuery(`?${q}`);
-  assert.deepEqual(back, { repo: { owner: "o", name: "r", ref: "dev", dir: null }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] });
+  assert.deepEqual(back, { repo: { owner: "o", name: "r", ref: "dev", dir: null, file: null }, lockfile: "backend/uv.lock", pythons: ["3.14", "3.14t"], platforms: ["linux-aarch64", "win-arm64"] });
+  const reqQuery = toQuery({ repo: { owner: "celery", name: "celery", ref: "main" }, lockfile: "requirements/default.txt", pythons: ["3.13"], platforms: ["linux-x86_64"] });
+  assert.equal(reqQuery, "repo=celery/celery&ref=main&lock=requirements/default.txt&py=3.13&t=linux-x86_64");
+  assert.deepEqual(fromQuery(`?${reqQuery}`), {
+    repo: { owner: "celery", name: "celery", ref: "main", dir: null, file: null },
+    lockfile: "requirements/default.txt",
+    pythons: ["3.13"],
+    platforms: ["linux-x86_64"],
+  });
   const odd = fromQuery("?repo=o/r&lock=../x&py=3.14,2.7,evil&t=linux-x86_64,amiga");
   assert.equal(odd.lockfile, null);
   assert.deepEqual(odd.pythons, ["3.14"]);
@@ -147,7 +163,7 @@ test("the badge Markdown links the check of the repo alone, and names the lockfi
   const url = md.slice(badge.length + 1, -1);
   assert.doesNotMatch(url, /[\s()[\]<>"']/);
   // The page reads the link back as the same repo and file, with nothing else picked.
-  assert.deepEqual(fromQuery(new URL(url).search), { repo: { owner: "o", name: "r", ref: null, dir: null }, lockfile: odd, pythons: [], platforms: [] });
+  assert.deepEqual(fromQuery(new URL(url).search), { repo: { owner: "o", name: "r", ref: null, dir: null, file: null }, lockfile: odd, pythons: [], platforms: [] });
 });
 
 test("Pythons sort with each free-threaded build after its own", () => {
