@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
-  cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  cliCommand, fixPrompt, verdictText, shareText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
 
@@ -209,6 +209,52 @@ test("the verdict reads right for one target and many", () => {
   assert.equal(verdictText({ gaps: 0, packages: 10, targets: 6 }), "✓ All 10 packages have a wheel for all 6 targets");
   // Every package skipped (a requirements file that names another index, say), or none listed: never a ✓.
   assert.equal(verdictText({ gaps: 0, unknown: 0, packages: 0, targets: 4 }), "No packages were checked");
+});
+
+test("shareText formats clean, gaps, unknowns, single target, and special characters as plain text", () => {
+  const url = "https://wheelgap.github.io/tracker/check/?repo=owner/name";
+  const sixPlatforms = ["linux-x86_64", "linux-aarch64", "musl-x86_64", "macos-arm64", "win-amd64", "win-arm64"];
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 0, packages: 212, targets: 12 }, ["3.14", "3.13"], sixPlatforms, url),
+    `✓ owner/name: all 212 dependencies have a wheel on Python 3.13, 3.14 for 6 platforms (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { gaps: 3, unknown: 0, packages: 212, targets: 6 }, ["3.14"], sixPlatforms, url),
+    `owner/name: 3 of 212 dependencies have no wheel on at least one of 6 targets (checked with wheelgap) ${url}`,
+  );
+  // Unknowns must never carry a ✓.
+  const withUnknown = shareText("owner/name", { gaps: 0, unknown: 2, packages: 212, targets: 6 }, ["3.14"], sixPlatforms, url);
+  assert.equal(
+    withUnknown,
+    `owner/name: no dependency is missing a wheel, but 2 of 212 couldn't be checked on some targets (checked with wheelgap) ${url}`,
+  );
+  assert.ok(!withUnknown.includes("✓"));
+  // One target / one platform / one gap.
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 0, packages: 1, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `✓ owner/name: 1 dependency has a wheel on Python 3.14 for 1 platform (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { gaps: 1, unknown: 0, packages: 10, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: 1 of 10 dependencies has no wheel on 1 target (checked with wheelgap) ${url}`,
+  );
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 1, packages: 10, targets: 1 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: no dependency is missing a wheel, but 1 of 10 couldn't be checked on 1 target (checked with wheelgap) ${url}`,
+  );
+  // Nothing checked: never a ✓.
+  assert.equal(
+    shareText("owner/name", { gaps: 0, unknown: 0, packages: 0, targets: 4 }, ["3.14"], ["linux-x86_64"], url),
+    `owner/name: no dependencies were checked (checked with wheelgap) ${url}`,
+  );
+  // Plain text, never HTML-escaped: characters like <, >, &, ", ' stay verbatim.
+  const rawName = `a&b/<c>"d'`;
+  const line = shareText(rawName, { gaps: 0, unknown: 0, packages: 5, targets: 1 }, ["3.14"], ["linux-x86_64"], url);
+  assert.equal(
+    line,
+    `✓ a&b/<c>"d': all 5 dependencies have a wheel on Python 3.14 for 1 platform (checked with wheelgap) ${url}`,
+  );
+  assert.ok(!line.includes("&amp;") && !line.includes("&lt;"));
 });
 
 test("next steps offer what isn't picked yet, as whole selections", () => {

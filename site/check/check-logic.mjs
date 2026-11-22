@@ -311,6 +311,29 @@ export function verdictText(h) {
   return `${h.gaps} of ${h.packages} packages ${h.gaps === 1 ? "has" : "have"} no wheel for ${some}`;
 }
 
+// One-line plain-text summary of a result, ending with the share link. Built as text, never as HTML.
+export function shareText(repoName, h, pythons, platforms, url) {
+  if (h.packages === 0) {
+    return `${repoName}: no dependencies were checked (checked with wheelgap) ${url}`;
+  }
+  if (h.targets === 0) {
+    return `${repoName}: lockfile leaves out every Python picked (checked with wheelgap) ${url}`;
+  }
+  if (h.gaps === 0 && h.unknown) {
+    const where = h.targets === 1 ? "1 target" : "some targets";
+    return `${repoName}: no dependency is missing a wheel, but ${h.unknown} of ${h.packages} couldn't be checked on ${where} (checked with wheelgap) ${url}`;
+  }
+  if (h.gaps === 0) {
+    const deps = h.packages === 1 ? "1 dependency has" : `all ${h.packages} dependencies have`;
+    const pyList = sortPythons(pythons).join(", ");
+    const plats = platforms.length === 1 ? "1 platform" : `${platforms.length} platforms`;
+    return `✓ ${repoName}: ${deps} a wheel on Python ${pyList} for ${plats} (checked with wheelgap) ${url}`;
+  }
+  const verb = h.gaps === 1 ? "has" : "have";
+  const where = h.targets === 1 ? "1 target" : `at least one of ${h.targets} targets`;
+  return `${repoName}: ${h.gaps} of ${h.packages} dependencies ${verb} no wheel on ${where} (checked with wheelgap) ${url}`;
+}
+
 // "Ready for what's next?" shortcuts: the platforms and Pythons people most often move to, that aren't picked yet.
 // Each is {label, pythons, platforms}: the whole selection to switch to.
 export function nextSteps(pythons, platforms) {

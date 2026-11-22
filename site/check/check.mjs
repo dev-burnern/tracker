@@ -3,7 +3,7 @@
 
 import {
   PLATFORMS, PYTHONS, parseRepo, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded,
-  fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
+  fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, shareText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown,
 } from "./check-logic.mjs";
 
@@ -225,6 +225,7 @@ function needsIndex(path) {
 function hideResultSections(hidden, keepSetup = false) {
   if (hidden) {
     $("next").hidden = true;
+    $("verdict-badge").hidden = true;
     $("verdict").closest("section").classList.remove("clean");
   }
   for (const id of ["targets-title", "gaps-title", "next-title"]) $(id).closest("section").hidden = hidden;
@@ -248,7 +249,9 @@ function renderVerdict() {
   const h = headline(r);
   const card = $("verdict").closest("section");
   const repoName = `${state.repo.owner}/${state.repo.name}`;
-  card.classList.toggle("clean", h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0);
+  const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
+  card.classList.toggle("clean", isClean);
+  $("verdict-badge").hidden = !isClean;
   $("verdict").textContent = h.targets === 0 ? `${repoName}'s lockfile leaves out every Python picked` : verdictText(h);
   const steps = nextSteps(state.pythons, state.platforms);
   $("next").hidden = !steps.length;
@@ -413,6 +416,11 @@ function renderTable() {
 
 function renderNext() {
   const r = state.result;
+  const h = headline(r);
+  const isClean = h.gaps === 0 && h.unknown === 0 && h.targets > 0 && h.packages > 0;
+  $("next-title").textContent = isClean ? "Keep it green" : "Fix it";
+  $("copy-prompt").hidden = isClean;
+  $("prompt-note").hidden = isClean;
   $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
   // The link names the lockfile only when a visit with the repo alone would start from another one.
   $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, pickLockfile(state.plan.lockfiles, null)?.path ?? null);
@@ -441,8 +449,10 @@ async function copy(button, text, done) {
 }
 
 $("copy-link").onclick = (e) => copy(e.currentTarget, location.href, "Link copied");
+$("copy-share").onclick = (e) => copy(e.currentTarget, shareText(`${state.repo.owner}/${state.repo.name}`, headline(state.result), state.pythons, state.platforms, location.href), "Result copied");
 $("copy-prompt").onclick = (e) => copy(e.currentTarget, fixPrompt(`${state.repo.owner}/${state.repo.name}`, state.result, state.fixes, state.pythons, state.platforms, state.gapWheels), "Prompt copied");
 $("copy-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
+$("copy-verdict-badge").onclick = (e) => copy(e.currentTarget, $("badge-md").textContent, "Badge Markdown copied");
 $("copy-gap-wheels").onclick = (e) => copy(e.currentTarget, state.gapWheels.text, "Gap wheel instructions copied");
 $("more").onclick = () => { state.showAll = true; renderTable(); };
 

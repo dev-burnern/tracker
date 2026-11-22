@@ -282,3 +282,87 @@ test("the badge is a small static image on the page's own origin, offered as Mar
   assert.match(page, /\$\("copy-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.doesNotMatch(page, /innerHTML/);
 });
+
+test("a clean verdict offers the README badge in the verdict card and hides it for gaps or unknowns", () => {
+  const html = read("index.html");
+  const card = html.match(/<section aria-labelledby="verdict" class="verdict-card">(.*?)<\/section>/s);
+  assert.ok(card, "verdict-card is in index.html");
+  assert.match(card[1], /<div id="verdict-badge" class="verdict-badge" hidden>/);
+  assert.match(card[1], /Keep it that way: add the check to your README/);
+  assert.match(card[1], /<img class="badge-img" src="badge\.svg" alt="wheelgap: check wheels" width="146" height="20">/);
+  assert.match(card[1], /<button type="button" class="action" id="copy-verdict-badge">Copy badge Markdown<\/button>/);
+
+  const actions = html.match(/<div class="actions">(.*?)<\/div>/s);
+  assert.ok(actions, "actions block is in index.html");
+  assert.match(actions[1], /id="copy-link"[^<]*<\/button>\s*<button type="button" class="action" id="copy-share">Copy result as text<\/button>/);
+
+  const source = read("check.mjs");
+  const rv = source.match(/^function renderVerdict\(\) \{.*?^}$/ms);
+  const rn = source.match(/^function renderNext\(\) \{.*?^}$/ms);
+  assert.ok(rv && rn, "renderVerdict and renderNext are in check.mjs");
+
+  const run = (rows, packages = 5, targets = [{ label: "3.14 linux-x86_64", python: "3.14", platform: "linux-x86_64" }]) => {
+    const made = new Map();
+    const element = (key) => {
+      if (!made.has(key)) {
+        const classes = new Set();
+        made.set(key, {
+          hidden: null,
+          textContent: "",
+          classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)), has: (c) => classes.has(c) },
+          closest: () => element(`${key} section`),
+          replaceChildren() {},
+        });
+      }
+      return made.get(key);
+    };
+    const state = {
+      repo: { owner: "o", name: "r" },
+      ref: "main",
+      plan: { lockfiles: [{ path: "uv.lock" }] },
+      pythons: ["3.14"],
+      platforms: ["linux-x86_64"],
+      result: { lockfile: "uv.lock", packages, targets, outside_lock: [], rows, skipped: [], private: [], looked_up: false },
+    };
+    const fns = new Function(
+      "$", "state", "el", "headline", "verdictText", "nextSteps", "sortPythons", "missedText", "cliCommand", "badgeMarkdown", "pickLockfile",
+      `${rv[0]}\n${rn[0]}\nreturn { renderVerdict, renderNext };`,
+    )(
+      element, state, () => ({}), checkLogic.headline, checkLogic.verdictText, checkLogic.nextSteps, checkLogic.sortPythons,
+      checkLogic.missedText, checkLogic.cliCommand, checkLogic.badgeMarkdown, checkLogic.pickLockfile,
+    );
+    fns.renderVerdict();
+    fns.renderNext();
+    return element;
+  };
+
+  // Clean result: verdict badge shown, bottom section renamed and fix-prompt hidden.
+  const clean = run([]);
+  assert.equal(clean("verdict-badge").hidden, false);
+  assert.equal(clean("verdict section").classList.has("clean"), true);
+  assert.equal(clean("next-title").textContent, "Keep it green");
+  assert.equal(clean("copy-prompt").hidden, true);
+  assert.equal(clean("prompt-note").hidden, true);
+
+  // Result with gaps: verdict badge hidden, Fix it heading and fix-prompt shown.
+  const withGaps = run([{ name: "a", gaps: ["3.14 linux-x86_64"], unknown: [] }]);
+  assert.equal(withGaps("verdict-badge").hidden, true);
+  assert.equal(withGaps("verdict section").classList.has("clean"), false);
+  assert.equal(withGaps("next-title").textContent, "Fix it");
+  assert.equal(withGaps("copy-prompt").hidden, false);
+  assert.equal(withGaps("prompt-note").hidden, false);
+
+  // Result with unknowns: verdict badge hidden, not clean.
+  const withUnknowns = run([{ name: "u", gaps: [], unknown: ["3.14 linux-x86_64"] }]);
+  assert.equal(withUnknowns("verdict-badge").hidden, true);
+  assert.equal(withUnknowns("verdict section").classList.has("clean"), false);
+  assert.equal(withUnknowns("next-title").textContent, "Fix it");
+
+  // Nothing checked: verdict badge hidden.
+  const empty = run([], 0);
+  assert.equal(empty("verdict-badge").hidden, true);
+
+  // Both new copy buttons use copy() like the existing ones.
+  assert.match(source, /\$\("copy-verdict-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
+  assert.match(source, /\$\("copy-share"\)\.onclick = \(e\) => copy\(e\.currentTarget, shareText\(/);
+});
