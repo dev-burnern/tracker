@@ -88,38 +88,37 @@ def _skipped_folder(parts: tuple[str, ...]) -> bool:
     return any(p.startswith(".") or p in suggest_targets._SKIP_DIRS for p in parts)
 
 
-_RUNTIME_REQ_STEMS = ("default", "base", "main", "prod", "production", "requirements")
+# Text files in a requirements/ folder that aren't requirements files, by the start of their name (any case), as
+# wheelgap's `wheelgap DIR` leaves them out (sources._NOT_REQUIREMENTS, after 0.13.0).
+_NOT_REQUIREMENTS = (
+    *("constraint", "readme", "license", "licence", "copying", "notice", "changelog", "changes"),
+    *("history", "authors", "contributing", "todo", "notes"),
+)
 
 
 def _is_extra_requirements(pp: PurePosixPath) -> bool:
-    """A *.txt file whose name or parent folder clearly marks it as a requirements file (not constraints)."""
-    name = pp.name.lower()
-    if not name.endswith(".txt") or name.startswith("constraints") or pp.name in LOCKFILES:
+    """A *.txt file whose name or folder marks it as a requirements file, under a name other than requirements.txt:
+    requirements*.txt, *-requirements.txt, *_requirements.txt, or a .txt in a folder named requirements (not
+    constraints, README.txt and the like). Case-sensitive, as wheelgap reads a file as requirements only by `.txt`."""
+    name = pp.name
+    if not name.endswith(".txt") or name in LOCKFILES or name.lower().startswith(_NOT_REQUIREMENTS):
         return False
     if name.startswith("requirements") or name.endswith(("-requirements.txt", "_requirements.txt")):
         return True
-    return len(pp.parts) >= 2 and pp.parts[-2].lower() == "requirements"
-
-
-def _requirements_priority(pp: PurePosixPath) -> tuple[int, int]:
-    stem = pp.stem.lower()
-    for prefix in ("requirements-", "requirements_"):
-        stem = stem.removeprefix(prefix)
-    for suffix in ("-requirements", "_requirements"):
-        stem = stem.removesuffix(suffix)
-    if stem in _RUNTIME_REQ_STEMS:
-        return (0, _RUNTIME_REQ_STEMS.index(stem))
-    return (1, 0)
+    return len(pp.parts) >= 2 and pp.parts[-2] == "requirements"
 
 
 def _lockfile_sort_key(path: str) -> tuple[int, int, int, int, str]:
+    """Every exactly-named file first, as before: shallowest, then in wheelgap's order, a pyproject.toml after the
+    lockfiles in its folder. Requirements files under other names come after all of those, shallowest then by name:
+    which one holds the project's dependencies can't be told from the name, so the page never picks one of them over
+    another file, and with several it asks (autoPick() in check-logic.mjs), as `wheelgap DIR` lists them."""
     pp = PurePosixPath(path)
     if pp.name in LOCKFILES:
-        return (path.count("/"), 0, LOCKFILES.index(pp.name), 0, path)
+        return (0, path.count("/"), 0, LOCKFILES.index(pp.name), path)
     if pp.name == "pyproject.toml":
-        return (path.count("/"), 1, 0, 0, path)
-    pri, idx = _requirements_priority(pp)
-    return (path.count("/"), 2, pri, idx, path)
+        return (0, path.count("/"), 1, 0, path)
+    return (1, path.count("/"), 0, 0, path)
 
 
 def plan(paths_json: str) -> str:
@@ -143,13 +142,16 @@ def plan(paths_json: str) -> str:
             dockerfiles.append(p)
         elif kind == "template":
             templates.append(p)
-    # A pyproject.toml comes after the lockfiles in the same folder, and extra requirements files come after it,
-    # with runtime names (default, base, main, prod, production, requirements) before the rest.
+    # A pyproject.toml comes after the lockfiles in the same folder; requirements files under other names come last.
     lockfiles.sort(key=_lockfile_sort_key)
     dockerfiles.sort(key=lambda p: (p.count("/"), p))
     return json.dumps(
         {
-            "lockfiles": [{"path": p, "offline": PurePosixPath(p).name in OFFLINE} for p in lockfiles[:MAX_LOCKFILES]],
+            "lockfiles": [
+                {"path": p, "offline": PurePosixPath(p).name in OFFLINE}
+                | ({"other": True} if _is_extra_requirements(PurePosixPath(p)) else {})
+                for p in lockfiles[:MAX_LOCKFILES]
+            ],
             "workflows": sorted(workflows),
             "dockerfiles": dockerfiles[:MAX_DOCKERFILES],
             "more_dockerfiles": max(0, len(dockerfiles) - MAX_DOCKERFILES),

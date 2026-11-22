@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, rawUrl, pickLockfile, autoPick, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -101,14 +101,30 @@ test("an unreadable pyproject.toml the page picked itself gives way to the repo'
   assert.equal(withoutUnreadable([locks[0]], "pyproject.toml", true), null); // nothing else to check
   const nested = [{ path: "a/pyproject.toml", offline: false }, { path: "a/b/pyproject.toml", offline: false }];
   assert.deepEqual(withoutUnreadable(nested, "a/pyproject.toml", true), [nested[1]]);
-  // Celery-style repo: an auto-picked pyproject.toml with no [project] table moves on to requirements/default.txt.
+  // Celery-style repo: an auto-picked pyproject.toml with no [project] table moves on to its requirements files, and
+  // with several of those the page asks which one (autoPick), as `wheelgap DIR` lists them: none is picked by name.
   const celery = [
     { path: "pyproject.toml", offline: false },
-    { path: "requirements/default.txt", offline: false },
-    { path: "requirements/docs.txt", offline: false },
+    { path: "requirements/default.txt", offline: false, other: true },
+    { path: "requirements/docs.txt", offline: false, other: true },
   ];
   const rest = withoutUnreadable(celery, "pyproject.toml", true);
-  assert.equal(pickLockfile(rest, null).path, "requirements/default.txt");
+  assert.deepEqual(autoPick(rest, null), { lock: null, choose: rest });
+});
+
+test("autoPick keeps the exactly-named files' pick, checks a lone other requirements file, and asks between several", () => {
+  const other = (path) => ({ path, offline: false, other: true });
+  const named = [{ path: "pyproject.toml", offline: false }, { path: "backend/uv.lock", offline: true }];
+  // Exactly-named files decide as pickLockfile() does, wherever the others are (they come last in plan() anyway).
+  assert.equal(autoPick([...named, other("requirements-dev.txt")], null).lock.path, "pyproject.toml");
+  assert.equal(autoPick([named[1], other("requirements-dev.txt")], null).lock.path, "backend/uv.lock");
+  assert.equal(autoPick([...named, other("backend/requirements-prod.txt")], "backend").lock.path, "backend/uv.lock");
+  assert.equal(autoPick([other("requirements/base.txt")], null).lock.path, "requirements/base.txt");
+  // Several: none, whatever their names or the folder a URL named.
+  const several = [other("requirements/base.txt"), other("requirements/docs.txt"), other("requirements/local.txt")];
+  assert.deepEqual(autoPick(several, null), { lock: null, choose: several });
+  assert.deepEqual(autoPick(several, "requirements"), { lock: null, choose: several });
+  assert.deepEqual(autoPick([], null), { lock: null, choose: null });
 });
 
 test("a file with nothing to check is no answer; one whose packages were skipped or aren't installed is", () => {

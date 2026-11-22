@@ -92,6 +92,17 @@ export function pickLockfile(lockfiles, dir) {
   return lockfiles.find(inDir) ?? lockfiles[0] ?? null;
 }
 
+// The file the page checks by itself: pickLockfile()'s pick among the exactly-named files, as before; with none of
+// those, the only requirements file under another name (`other`, from plan()). With several of those it picks none
+// and returns them in `choose`: which one holds the project's dependencies can't be told from a name, so, like
+// `wheelgap DIR`, the page lists them and the visitor picks. {lock: null, choose: null} when there's nothing at all.
+export function autoPick(lockfiles, dir) {
+  const named = lockfiles.filter((l) => !l.other);
+  if (named.length) return { lock: pickLockfile(named, dir), choose: null };
+  if (lockfiles.length === 1) return { lock: lockfiles[0], choose: null };
+  return { lock: null, choose: lockfiles.length ? lockfiles : null };
+}
+
 // After wheelgap couldn't read `failed`: the repo's other files to pick from instead, or null to report the error.
 // Only for a pyproject.toml the page picked itself: it's listed without knowing whether it has [project]
 // dependencies to read (many hold only tool settings), so the repo's next file is the better answer. A file the

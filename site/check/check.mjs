@@ -2,7 +2,7 @@
 // Everything shown from the repo or PyPI goes in with textContent, never as HTML.
 
 import {
-  PLATFORMS, PYTHONS, parseRepo, pickLockfile, toQuery, fromQuery, sortPythons, freeThreaded,
+  PLATFORMS, PYTHONS, parseRepo, autoPick, toQuery, fromQuery, sortPythons, freeThreaded,
   fixFor, rowsFor, headline, cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown,
 } from "./check-logic.mjs";
@@ -144,18 +144,19 @@ function onLoaded({ plan, detected, truncated, ref, root }) {
   Object.assign(state, { plan, detected, truncated, ref, root });
   const q = state.query;
   const named = q?.lockfile && plan.lockfiles.find((l) => l.path === q.lockfile);
-  const lock = named || pickLockfile(plan.lockfiles, state.repo.dir);
+  const pick = named ? { lock: named, choose: null } : autoPick(plan.lockfiles, state.repo.dir);
   state.auto = !named; // the page's own pick, not one a link or the visitor named
-  if (!lock) {
+  if (!pick.lock && !pick.choose) {
     status("");
     $("go").disabled = false;
     return noLockfile();
   }
-  state.lockfile = lock.path;
   state.pythons = sortPythons(q?.pythons?.length ? q.pythons : detected.pythons);
   state.platforms = q?.platforms?.length ? q.platforms : detected.platforms.filter((p) => NAMES[p]);
   if (!state.platforms.length) state.platforms = ["linux-x86_64"];
   state.query = null;
+  if (!pick.lock) return chooseFile(pick.choose);
+  state.lockfile = pick.lock.path;
   runCheck();
 }
 
@@ -186,7 +187,9 @@ function onResult(result) {
     // next file is checked instead, and "What was read" says why this one wasn't.
     state.detected.unreadable.push({ path: state.lockfile, line: null, reason });
     state.plan.lockfiles = rest;
-    state.lockfile = pickLockfile(rest, state.repo.dir).path;
+    const pick = autoPick(rest, state.repo.dir);
+    if (!pick.lock) return chooseFile(pick.choose);
+    state.lockfile = pick.lock.path;
     return runCheck();
   }
   if (result.error) {
@@ -201,6 +204,23 @@ function onResult(result) {
   loadLab(result);
   keepFocus(render);
   $("out").hidden = false;
+}
+
+// Several requirements files under other names and nothing else to check: the page doesn't guess which one is the
+// project's (as `wheelgap DIR` doesn't), so it lists them and the picker checks the one chosen.
+function chooseFile(files) {
+  state.lockfile = null;
+  state.result = null;
+  status("");
+  $("go").disabled = false;
+  $("out").hidden = false;
+  const names = files.map((l) => l.path);
+  const some = `${names.slice(0, 8).join(", ")}${names.length > 8 ? `, and ${names.length - 8} more` : ""}`;
+  $("verdict").textContent = "Pick the file to check";
+  $("verdict-detail").textContent = `${state.repo.owner}/${state.repo.name} has no lockfile the page reads by itself, but ${names.length} requirements files: ${some}. Which one holds the project's dependencies can't be told from its name, so pick it under "Lockfile" below.`;
+  $("alerts").replaceChildren();
+  renderSetup();
+  hideResultSections(true, true);
 }
 
 function noLockfile() {
@@ -320,13 +340,16 @@ function renderSetup() {
 
   const locks = state.plan.lockfiles;
   $("lock-pick").hidden = locks.length < 2;
-  $("lockfile").replaceChildren(...locks.map((l) => el("option", { value: l.path, selected: l.path === state.lockfile, text: l.offline ? l.path : `${l.path} (looks packages up on PyPI)` })));
+  $("lockfile").replaceChildren(
+    ...(state.lockfile ? [] : [el("option", { value: "", disabled: true, selected: true, text: "Choose a file…" })]),
+    ...locks.map((l) => el("option", { value: l.path, selected: l.path === state.lockfile, text: l.offline ? l.path : `${l.path} (looks packages up on PyPI)` })),
+  );
   $("lockfile").onchange = () => { state.lockfile = $("lockfile").value; state.auto = false; runCheck(); };
 
   const repoUrl = `https://github.com/${state.repo.owner}/${state.repo.name}/blob/${encodeURIComponent(state.ref || "HEAD")}/`;
   const link = (path, line) => el("a", { href: `${repoUrl}${path.split("/").map(encodeURIComponent).join("/")}${line ? `#L${line}` : ""}`, rel: "noopener" }, el("code", { text: `${path}${line ? `:${line}` : ""}` }));
   const items = [
-    el("li", {}, "Lockfile: ", link(state.lockfile)),
+    state.lockfile ? el("li", {}, "Lockfile: ", link(state.lockfile)) : el("li", { text: "Lockfile: none picked yet." }),
     ...d.found.map((f) => el("li", {}, `${f.kind === "target" ? "Platform" : "Python"} ${f.value}, from `, link(f.path, f.line), ` (${f.source})`)),
     ...d.unreadable.map((u) => el("li", {}, "Not read: ", link(u.path, u.line), ` (${u.reason})`)),
   ];
@@ -415,7 +438,7 @@ function renderNext() {
   const r = state.result;
   $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
   // The link names the lockfile only when a visit with the repo alone would start from another one.
-  $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, pickLockfile(state.plan.lockfiles, null)?.path ?? null);
+  $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, autoPick(state.plan.lockfiles, null).lock?.path ?? null);
   const caveats = [
     "A wheel on PyPI means pip and uv install it without compiling; it doesn't test that the package works there.",
     r.looked_up

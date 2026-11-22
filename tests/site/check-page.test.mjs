@@ -278,7 +278,64 @@ test("the badge is a small static image on the page's own origin, offered as Mar
 
   const page = read("check.mjs");
   // Filled in as text, from the pure helper, and copied the way the other buttons copy.
-  assert.match(page, /\$\("badge-md"\)\.textContent = badgeMarkdown\(state\.repo, r\.lockfile, pickLockfile\(state\.plan\.lockfiles, null\)\?\.path \?\? null\);/);
+  // The default is what a visit with the repo alone checks by itself: none, when it would ask which file (autoPick).
+  assert.match(page, /\$\("badge-md"\)\.textContent = badgeMarkdown\(state\.repo, r\.lockfile, autoPick\(state\.plan\.lockfiles, null\)\.lock\?\.path \?\? null\);/);
   assert.match(page, /\$\("copy-badge"\)\.onclick = \(e\) => copy\(e\.currentTarget, \$\("badge-md"\)\.textContent, "Badge Markdown copied"\);/);
   assert.doesNotMatch(page, /innerHTML/);
 });
+
+// onLoaded() and onResult() with the worker and the DOM stood in: `chooseFile` and `runCheck` record what they're
+// asked to do.
+function pickPage(lockfiles, { query = null, lockfile = null } = {}) {
+  const source = read("check.mjs");
+  const fn = (name) => source.match(new RegExp(`^function ${name}\\(.*?^}$`, "ms"))[0];
+  const calls = [];
+  const $ = () => ({ hidden: false, textContent: "", disabled: false });
+  const state = { repo: { owner: "celery", name: "celery", dir: null }, query, lockfile, auto: true, detected: { unreadable: [] } };
+  const page = new Function(
+    "state", "$", "status", "autoPick", "sortPythons", "NAMES", "noLockfile", "needsIndex", "runCheck", "chooseFile",
+    "unreadableReason", "withoutUnreadable", `${fn("onLoaded")}\n${fn("onResult")}\nreturn { onLoaded, onResult };`,
+  )(
+    state, $, () => {}, checkLogic.autoPick, checkLogic.sortPythons, Object.fromEntries(checkLogic.PLATFORMS),
+    () => calls.push(["noLockfile"]), () => calls.push(["needsIndex"]), () => calls.push(["runCheck", state.lockfile]),
+    (files) => calls.push(["choose", files.map((l) => l.path)]), checkLogic.unreadableReason, checkLogic.withoutUnreadable,
+  );
+  const loaded = () => page.onLoaded({
+    plan: { lockfiles: [...lockfiles] }, detected: { pythons: ["3.14"], platforms: ["linux-x86_64"], unreadable: [] },
+    truncated: false, ref: "HEAD", root: "/repos/1",
+  });
+  return { page, state, calls, loaded };
+}
+
+test("with several requirements files under other names and nothing else, the page asks which one, never guesses", () => {
+  const celery = [
+    { path: "pyproject.toml", offline: false },
+    { path: "requirements/default.txt", offline: false, other: true },
+    { path: "requirements/docs.txt", offline: false, other: true },
+  ];
+  // The pyproject.toml (tool settings only) is tried first, then the visitor is asked: no runtime-sounding name wins.
+  const p = pickPage(celery);
+  p.loaded();
+  assert.deepEqual(p.calls, [["runCheck", "pyproject.toml"]]);
+  p.page.onResult({ kind: "source", error: "pyproject.toml: no [project] table, so there are no dependencies to read" });
+  assert.deepEqual(p.calls.at(-1), ["choose", ["requirements/default.txt", "requirements/docs.txt"]]);
+  assert.equal(p.calls.filter(([c]) => c === "runCheck").length, 1);
+  // Only those files: asked straight away.
+  const only = pickPage(celery.slice(1));
+  only.loaded();
+  assert.deepEqual(only.calls, [["choose", ["requirements/default.txt", "requirements/docs.txt"]]]);
+  assert.deepEqual(only.state.platforms, ["linux-x86_64"]); // set, so the picker's check has targets
+  // One such file is the answer, as `wheelgap DIR` reads its only one; a link that names a file checks that one.
+  const one = pickPage(celery.slice(1, 2));
+  one.loaded();
+  assert.deepEqual(one.calls, [["runCheck", "requirements/default.txt"]]);
+  const named = pickPage(celery.slice(1), { query: { lockfile: "requirements/docs.txt" } });
+  named.loaded();
+  assert.deepEqual(named.calls, [["runCheck", "requirements/docs.txt"]]);
+  // An exactly-named file anywhere still comes first, as before these files were listed.
+  const nested = pickPage([...celery.slice(1), { path: "backend/uv.lock", offline: true }]);
+  nested.loaded();
+  assert.deepEqual(nested.calls, [["runCheck", "backend/uv.lock"]]);
+  assert.match(read("check.mjs"), /state\.lockfile \? \[\] : \[el\("option", \{ value: "", disabled: true, selected: true, text: "Choose a file…" \}\)\]/);
+});
+

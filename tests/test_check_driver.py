@@ -135,16 +135,19 @@ def test_plan_picks_files_like_suggest_targets():
     assert plan["python_version"] == ".python-version"
 
 
-def test_plan_lists_other_requirements_filenames_with_runtime_priority():
+def test_plan_lists_other_requirements_filenames_after_every_exactly_named_file():
     paths = [
         "pyproject.toml",
         "constraints.txt",
         "constraints-dev.txt",
         "requirements/constraints.txt",
+        "requirements/README.txt",
         "requirements/docs.txt",
         "requirements/test.txt",
         "requirements/default.txt",
         "requirements/base.txt",
+        "requirements/Notes.txt",
+        "Requirements-dev.TXT",
         "tests/requirements.txt",
         "tests/requirements/default.txt",
         "requirements-dev.txt",
@@ -152,17 +155,23 @@ def test_plan_lists_other_requirements_filenames_with_runtime_priority():
         "extra_requirements.txt",
     ]
     plan = json.loads(driver.plan(json.dumps(paths)))
-    assert [entry["path"] for entry in plan["lockfiles"]] == [
-        "pyproject.toml",
-        "prod-requirements.txt",
-        "extra_requirements.txt",
-        "requirements-dev.txt",
-        "requirements/default.txt",
-        "requirements/base.txt",
-        "requirements/docs.txt",
-        "requirements/test.txt",
+    # No order by how runtime-like a name sounds: autoPick() in check-logic.mjs asks which one when there are several,
+    # as `wheelgap DIR` lists them and never picks one.
+    assert plan["lockfiles"] == [
+        {"path": "pyproject.toml", "offline": False},
+        *(
+            {"path": p, "offline": False, "other": True}
+            for p in [
+                "extra_requirements.txt",
+                "prod-requirements.txt",
+                "requirements-dev.txt",
+                "requirements/base.txt",
+                "requirements/default.txt",
+                "requirements/docs.txt",
+                "requirements/test.txt",
+            ]
+        ),
     ]
-    assert all(entry["offline"] is False for entry in plan["lockfiles"])
 
     # A root requirements.txt still comes first ahead of other root requirements files.
     with_root = json.loads(driver.plan(json.dumps(["requirements-dev.txt", "requirements.txt", "requirements/default.txt"])))
@@ -171,6 +180,10 @@ def test_plan_lists_other_requirements_filenames_with_runtime_priority():
         "requirements-dev.txt",
         "requirements/default.txt",
     ]
+    assert "other" not in with_root["lockfiles"][0]
+    # And an exactly-named file deeper in the repo still outranks them, so the page's pick is what it was before.
+    nested = json.loads(driver.plan(json.dumps(["requirements-dev.txt", "backend/uv.lock", "backend/pyproject.toml"])))
+    assert [entry["path"] for entry in nested["lockfiles"]] == ["backend/uv.lock", "backend/pyproject.toml", "requirements-dev.txt"]
 
 
 def test_needs_and_check_read_nested_requirements_file_with_include(tmp_path):
