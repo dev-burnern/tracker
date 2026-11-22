@@ -88,6 +88,40 @@ def _skipped_folder(parts: tuple[str, ...]) -> bool:
     return any(p.startswith(".") or p in suggest_targets._SKIP_DIRS for p in parts)
 
 
+_RUNTIME_REQ_STEMS = ("default", "base", "main", "prod", "production", "requirements")
+
+
+def _is_extra_requirements(pp: PurePosixPath) -> bool:
+    """A *.txt file whose name or parent folder clearly marks it as a requirements file (not constraints)."""
+    name = pp.name.lower()
+    if not name.endswith(".txt") or name.startswith("constraints") or pp.name in LOCKFILES:
+        return False
+    if name.startswith("requirements") or name.endswith(("-requirements.txt", "_requirements.txt")):
+        return True
+    return len(pp.parts) >= 2 and pp.parts[-2].lower() == "requirements"
+
+
+def _requirements_priority(pp: PurePosixPath) -> tuple[int, int]:
+    stem = pp.stem.lower()
+    for prefix in ("requirements-", "requirements_"):
+        stem = stem.removeprefix(prefix)
+    for suffix in ("-requirements", "_requirements"):
+        stem = stem.removesuffix(suffix)
+    if stem in _RUNTIME_REQ_STEMS:
+        return (0, _RUNTIME_REQ_STEMS.index(stem))
+    return (1, 0)
+
+
+def _lockfile_sort_key(path: str) -> tuple[int, int, int, int, str]:
+    pp = PurePosixPath(path)
+    if pp.name in LOCKFILES:
+        return (path.count("/"), 0, LOCKFILES.index(pp.name), 0, path)
+    if pp.name == "pyproject.toml":
+        return (path.count("/"), 1, 0, 0, path)
+    pri, idx = _requirements_priority(pp)
+    return (path.count("/"), 2, pri, idx, path)
+
+
 def plan(paths_json: str) -> str:
     """The files to fetch, from the repo tree's paths (blobs only): lockfiles, workflows, Dockerfiles and the root
     .python-version. Lockfiles come shallowest first, then in wheelgap's order, so the first is the one
@@ -102,22 +136,16 @@ def plan(paths_json: str) -> str:
             continue
         if _skipped_folder(folders):
             continue
-        if pp.name in LOCKFILES or pp.name == "pyproject.toml":
+        if pp.name in LOCKFILES or pp.name == "pyproject.toml" or _is_extra_requirements(pp):
             lockfiles.append(p)
         kind = suggest_targets._container_kind(pp.name)
         if kind == "file":
             dockerfiles.append(p)
         elif kind == "template":
             templates.append(p)
-    # A pyproject.toml comes after the lockfiles in the same folder, so a uv.lock next to one is still picked first.
-    lockfiles.sort(
-        key=lambda p: (
-            p.count("/"),
-            PurePosixPath(p).name not in LOCKFILES,
-            LOCKFILES.index(PurePosixPath(p).name) if PurePosixPath(p).name in LOCKFILES else 0,
-            p,
-        )
-    )
+    # A pyproject.toml comes after the lockfiles in the same folder, and extra requirements files come after it,
+    # with runtime names (default, base, main, prod, production, requirements) before the rest.
+    lockfiles.sort(key=_lockfile_sort_key)
     dockerfiles.sort(key=lambda p: (p.count("/"), p))
     return json.dumps(
         {

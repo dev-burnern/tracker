@@ -135,6 +135,65 @@ def test_plan_picks_files_like_suggest_targets():
     assert plan["python_version"] == ".python-version"
 
 
+def test_plan_lists_other_requirements_filenames_with_runtime_priority():
+    paths = [
+        "pyproject.toml",
+        "constraints.txt",
+        "constraints-dev.txt",
+        "requirements/constraints.txt",
+        "requirements/docs.txt",
+        "requirements/test.txt",
+        "requirements/default.txt",
+        "requirements/base.txt",
+        "tests/requirements.txt",
+        "tests/requirements/default.txt",
+        "requirements-dev.txt",
+        "prod-requirements.txt",
+        "extra_requirements.txt",
+    ]
+    plan = json.loads(driver.plan(json.dumps(paths)))
+    assert [entry["path"] for entry in plan["lockfiles"]] == [
+        "pyproject.toml",
+        "prod-requirements.txt",
+        "extra_requirements.txt",
+        "requirements-dev.txt",
+        "requirements/default.txt",
+        "requirements/base.txt",
+        "requirements/docs.txt",
+        "requirements/test.txt",
+    ]
+    assert all(entry["offline"] is False for entry in plan["lockfiles"])
+
+    # A root requirements.txt still comes first ahead of other root requirements files.
+    with_root = json.loads(driver.plan(json.dumps(["requirements-dev.txt", "requirements.txt", "requirements/default.txt"])))
+    assert [entry["path"] for entry in with_root["lockfiles"]] == [
+        "requirements.txt",
+        "requirements-dev.txt",
+        "requirements/default.txt",
+    ]
+
+
+def test_needs_and_check_read_nested_requirements_file_with_include(tmp_path):
+    req_dir = tmp_path / "requirements"
+    req_dir.mkdir()
+    (req_dir / "base.txt").write_text("-r common.txt\npurewheel==3.1\n", encoding="utf-8")
+    first = json.loads(driver.needs(str(tmp_path), "requirements/base.txt"))
+    assert first["kind"] == "include" and first["path"] == "requirements/common.txt"
+
+    (req_dir / "common.txt").write_text("fastlib==2.0.0\n", encoding="utf-8")
+    needed = json.loads(driver.needs(str(tmp_path), "requirements/base.txt"))
+    assert {(l["name"], l["version"]) for l in needed["lookups"]} == {("fastlib", "2.0.0"), ("purewheel", "3.1")}
+
+    lookups = {
+        "purewheel==3.1": {"info": {"version": "3.1"}, "urls": [{"filename": "purewheel-3.1-py3-none-any.whl"}]},
+        "fastlib==2.0.0": {"info": {"version": "2.0.0"}, "urls": [{"filename": "fastlib-2.0.0.tar.gz"}]},
+    }
+    res = json.loads(driver.check(str(tmp_path), "requirements/base.txt", options(), json.dumps(lookups)))
+    assert res["looked_up"] is True
+    assert res["packages"] == 2
+    assert [row["name"] for row in res["rows"]] == ["fastlib"]
+
+
 def test_detect_reads_ci_and_dockerfiles(repo):
     d = json.loads(driver.detect(str(repo)))
     assert d["platforms_from"] == "ci" and d["python_from"] == "ci"

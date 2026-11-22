@@ -101,6 +101,14 @@ test("an unreadable pyproject.toml the page picked itself gives way to the repo'
   assert.equal(withoutUnreadable([locks[0]], "pyproject.toml", true), null); // nothing else to check
   const nested = [{ path: "a/pyproject.toml", offline: false }, { path: "a/b/pyproject.toml", offline: false }];
   assert.deepEqual(withoutUnreadable(nested, "a/pyproject.toml", true), [nested[1]]);
+  // Celery-style repo: an auto-picked pyproject.toml with no [project] table moves on to requirements/default.txt.
+  const celery = [
+    { path: "pyproject.toml", offline: false },
+    { path: "requirements/default.txt", offline: false },
+    { path: "requirements/docs.txt", offline: false },
+  ];
+  const rest = withoutUnreadable(celery, "pyproject.toml", true);
+  assert.equal(pickLockfile(rest, null).path, "requirements/default.txt");
 });
 
 test("a file with nothing to check is no answer; one whose packages were skipped or aren't installed is", () => {
