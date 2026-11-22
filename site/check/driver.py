@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlparse
 
 import wheelgap
 from packaging.utils import canonicalize_name
-from wheelgap import api, offline, origin, pypi, suggest_targets
+from wheelgap import api, offline, origin, pypi, sources, suggest_targets
 from wheelgap import suggest as release_suggest
 from wheelgap.check import Row, Status
 from wheelgap.sources import LOCKFILES, Package, Source, SourceError, load_file, pythons_outside_lock
@@ -42,15 +40,20 @@ GAPS = (Status.SOURCE, Status.MISSING)  # no wheel; UNKNOWN (couldn't be checked
 MAX_LOCKFILES = 30
 MAX_DOCKERFILES = 40
 
-# Public extra indexes whose presence in a requirements file does not make the rest of the file's packages private.
-# Adding a host is a reviewed change; each entry names who runs it and the packages that index may serve instead of PyPI.
+# Public extra indexes: a requirements file whose only index options are an --extra-index-url to one of these is still
+# looked up on PyPI (pip asks PyPI for every name too, so none is private). Adding a host is a reviewed change; each
+# entry names who runs it and the packages that index may serve instead of PyPI's, which are shown as unknown.
 PUBLIC_EXTRA_INDEXES: dict[str, frozenset[str]] = {
-    # PyTorch Foundation (Linux Foundation) — official CUDA/ROCm/CPU wheels for PyTorch.
+    # PyTorch Foundation (Linux Foundation): the official CUDA, ROCm and CPU wheels of PyTorch.
     "download.pytorch.org": frozenset({"torch", "torchvision", "torchaudio"}),
 }
-_PRIVATE_INDEX_FLAGS = frozenset({"--index-url", "-i", "--find-links", "-f", "--no-index"})
-_INCLUDE_FLAGS = frozenset({"-r", "--requirement", "-c", "--constraint"})
-_UV_INDEX_RE = re.compile(r"\b(?:index-url|extra-index-url|find-links|no-index)\b|\[\[tool\.uv\.index\]\]|\[tool\.uv\.sources\]")
+# The one option line taken as public, whole: `--extra-index-url URL` or `--extra-index-url=URL`, nothing else on it,
+# the URL https on a lowercase host with a plain path: no user@, port, quote, ${VAR}, %, ?, # or backslash, which pip
+# could read as something else. Anything else wheelgap counts as an index option keeps the file private.
+_PUBLIC_EXTRA_LINE = re.compile(r"--extra-index-url(?:=|[ \t]+)https://([a-z0-9.-]+)(?:/[A-Za-z0-9._~/-]*)?")
+# The installer settings files wheelgap reads from a requirements file's folder and the folders above it
+# (sources._nearby_config_names_an_index): uv applies [tool.uv] to `uv pip install -r`.
+CONFIG_NAMES = ("uv.toml", "pyproject.toml", "pdm.toml")
 
 try:
     from wheelgap import gapwheels
@@ -140,6 +143,8 @@ def plan(paths_json: str) -> str:
             "more_dockerfiles": max(0, len(dockerfiles) - MAX_DOCKERFILES),
             "templates": sorted(templates),
             "python_version": ".python-version" if ".python-version" in paths else None,
+            # Every installer settings file in the repo, wherever it is, for _public_extra_hosts().
+            "configs": sorted(p for p in paths if PurePosixPath(p).name in CONFIG_NAMES),
         }
     )
 
@@ -190,82 +195,39 @@ def detect(root: str) -> str:
     )
 
 
-def _public_extra_indexes(root: Path, path: Path) -> list[str] | None:
-    """Return sorted allowlisted hosts if every index option in `path` (and its includes) is a credential-free
-    `--extra-index-url` on PUBLIC_EXTRA_INDEXES and no sibling pyproject.toml/uv.toml names an index; else None."""
-    resolved_root = root.resolve()
-    for folder in {path.parent, root}:
-        if (folder / "uv.toml").exists():
-            return None
-        pyproject = folder / "pyproject.toml"
-        if pyproject.exists():
-            try:
-                if _UV_INDEX_RE.search(pyproject.read_text(encoding="utf-8")):
-                    return None
-            except OSError:
-                return None
-    hosts: set[str] = set()
-    seen: set[Path] = set()
-    stack = [path]
-    while stack:
-        current = stack.pop().resolve()
-        if current in seen:
-            continue
-        if not current.is_relative_to(resolved_root):
-            return None
-        seen.add(current)
-        try:
-            raw_lines = current.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            return None
-        logical: list[str] = []
-        buf = ""
-        for raw in raw_lines:
-            if raw.endswith("\\"):
-                buf += raw[:-1]
-                continue
-            logical.append(buf + raw)
-            buf = ""
-        if buf:
-            logical.append(buf)
-        for line in logical:
-            stripped = line.split("#", 1)[0].strip()
-            if not stripped:
-                continue
-            try:
-                tokens = shlex.split(stripped)
-            except ValueError:
-                return None
-            i = 0
-            while i < len(tokens):
-                tok = tokens[i]
-                flag, eq, val = tok.partition("=")
-                if flag in _PRIVATE_INDEX_FLAGS:
-                    return None
-                if flag == "--extra-index-url":
-                    if not eq:
-                        i += 1
-                        if i >= len(tokens):
-                            return None
-                        val = tokens[i]
-                    parsed = urlparse(val)
-                    if parsed.scheme not in ("http", "https") or parsed.username is not None or parsed.password is not None:
-                        return None
-                    host = (parsed.hostname or "").lower()
-                    if host not in PUBLIC_EXTRA_INDEXES:
-                        return None
-                    hosts.add(host)
-                elif flag in _INCLUDE_FLAGS:
-                    if not eq:
-                        i += 1
-                        if i >= len(tokens):
-                            return None
-                        val = tokens[i]
-                    if "://" in val:
-                        return None
-                    stack.append(current.parent / val)
-                i += 1
-    return sorted(hosts) if hosts else None
+def _public_extra_hosts(root: str, path: str, configs_json: str | None) -> list[str]:
+    """The PUBLIC_EXTRA_INDEXES hosts a requirements file installs from, when they're certain to be its only other
+    index; [] (the file stays private, as before) whenever that isn't certain.
+
+    The option lines are the ones wheelgap's own reader collects as possibly naming an index
+    (sources._read_requirements: the file and its includes, read as utf-8-sig with pip's line joining, comments and
+    abbreviations; an include it can't read counts too), so this never reads a line differently from it. Each must be
+    a whole _PUBLIC_EXTRA_LINE on a listed host. And no installer settings file may be in the file's folder or above:
+    on disk, as wheelgap checks it; and in the repo, from `configs` (plan()'s list of them, which the worker passes),
+    since the browser doesn't fetch them. Without that list nothing is certain. When the worker's wheelgap pin
+    changes, re-check that _read_requirements still has this signature: if it doesn't, this fails closed."""
+    configs = json.loads(configs_json) if configs_json else None
+    if not isinstance(configs, list) or not all(isinstance(c, str) for c in configs):
+        return []
+    folder = PurePosixPath(path).parent
+    for config in map(PurePosixPath, configs):
+        if config.name in CONFIG_NAMES and (config.parent == folder or config.parent in folder.parents):
+            return []
+    file = Path(root) / path
+    found: list[str] = []
+    try:
+        if sources._nearby_config_names_an_index(file):
+            return []
+        sources._read_requirements(file, {False: set(), True: set()}, [], index_options=found)
+    except Exception:  # noqa: BLE001 - anything wheelgap can't read is never certain
+        return []
+    hosts = set()
+    for line in found:
+        m = _PUBLIC_EXTRA_LINE.fullmatch(line)
+        if m is None or m.group(1) not in PUBLIC_EXTRA_INDEXES:
+            return []
+        hosts.add(m.group(1))
+    return sorted(hosts)
 
 
 def _private(source: Source, pkg: Package, *, allow_public_extra: bool = False) -> bool:
@@ -310,7 +272,7 @@ def _lookup_key(pkg: Package) -> str:
     return f"{name}=={pkg.version}" if pkg.version else name
 
 
-def needs(root: str, path: str) -> str:
+def needs(root: str, path: str, configs_json: str | None = None) -> str:
     """The PyPI lookups checking `path` needs: every package wheelgap's pypi.fill_all() would look up, with its
     canonical name and pinned version or null, each once. A package that has to stay off pypi.org (see _private) is
     never listed. A lockfile check() reads offline needs none: it's checked from the files it lists, or not at all.
@@ -334,11 +296,9 @@ def needs(root: str, path: str) -> str:
     except (SourceError, ValueError, OSError) as e:  # ValueError: a file that isn't valid TOML or JSON
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
     extra_hosts = (
-        _public_extra_indexes(Path(root), Path(root) / path)
-        if source.kind == "requirements" and not source.pypi_only
-        else None
+        _public_extra_hosts(root, path, configs_json) if source.kind == "requirements" and not source.pypi_only else []
     )
-    extra_pkg_hosts = {pkg: host for host in (extra_hosts or ()) for pkg in PUBLIC_EXTRA_INDEXES[host]}
+    extra_pkg_hosts = {pkg: host for host in extra_hosts for pkg in PUBLIC_EXTRA_INDEXES[host]}
     lookups = {
         _lookup_key(pkg): {"name": canonicalize_name(pkg.name), "version": pkg.version or None}
         for pkg in _lookups(source, allow_public_extra=bool(extra_hosts), extra_pkg_hosts=extra_pkg_hosts)
@@ -373,7 +333,9 @@ def _fill_lookups(
             pkg.files = None  # as fill_all(): never judged on the files a pixi.lock happened to record
 
 
-def check(root: str, lockfile: str, options_json: str, lookups_json: str | None = None) -> str:
+def check(
+    root: str, lockfile: str, options_json: str, lookups_json: str | None = None, configs_json: str | None = None
+) -> str:
     """The lockfile's packages with a gap on any target, read offline from the files it lists.
 
     options: {"pythons": [...], "platforms": [...], "glibc"?, "musl"?, "macos"?}. A target Python the lock's
@@ -405,11 +367,11 @@ def check(root: str, lockfile: str, options_json: str, lookups_json: str | None 
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
     looked_up = path.name not in OFFLINE
     extra_hosts = (
-        _public_extra_indexes(Path(root), path)
+        _public_extra_hosts(root, lockfile, configs_json)
         if looked_up and source.kind == "requirements" and not source.pypi_only
-        else None
+        else []
     )
-    extra_pkg_hosts = {pkg: host for host in (extra_hosts or ()) for pkg in PUBLIC_EXTRA_INDEXES[host]}
+    extra_pkg_hosts = {pkg: host for host in extra_hosts for pkg in PUBLIC_EXTRA_INDEXES[host]}
     if looked_up:
         _fill_lookups(
             source,
@@ -486,7 +448,8 @@ def check(root: str, lockfile: str, options_json: str, lookups_json: str | None 
             "listed": len(source.packages),
             "skipped": sorted({p.name for p in source.packages if p.skip}),
             "private": sorted({p.name for p in source.packages if p.skip == "private index"}),
-            "extra_indexes": extra_hosts or [],
+            "extra_indexes": extra_hosts,
+            "reader": source.kind,
             "looked_up": looked_up,
             "per_target": per_target,
             "rows": rows,

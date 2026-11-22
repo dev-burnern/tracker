@@ -268,11 +268,18 @@ function renderVerdict() {
   if (missed) alerts.push(el("p", { class: "alert warn", text: missed }));
   const some = (names) => `${names.slice(0, 8).join(", ")}${names.length > 8 ? `, and ${names.length - 8} more` : ""}`;
   for (const host of r.extra_indexes || []) {
-    alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} also installs from ${host} (--extra-index-url). This page checked PyPI only.` }));
+    // The packages that index may serve instead of PyPI's are unknown, never PyPI's answer as if it were certain.
+    const served = r.rows.filter((row) => row.reason && row.reason.includes(host)).map((row) => row.name);
+    const why = served.length ? ` ${some(served)} may be installed from there instead, so ${served.length === 1 ? "it's" : "they're"} shown as unknown.` : "";
+    alerts.push(el("p", { class: "alert warn", text: `${r.lockfile} also installs from ${host} (--extra-index-url). This page checked PyPI only.${why}` }));
   }
   const privateIndex = r.private || [];
+  // The CLI looks a requirements file's or a pyproject.toml's packages up on PyPI whatever index it names (an
+  // --index-url alone isn't the same install as an --extra-index-url); a lock that pins a package to another index
+  // (Pipfile.lock, pixi.lock) is skipped there too, unless --index-url names that index.
+  const lookedUpByCli = r.reader === "requirements" || r.reader === "pyproject";
   if (privateIndex.length) {
-    alerts.push(el("p", { class: "alert warn", text: `Not checked: ${r.lockfile} names an index or source other than PyPI (an --index-url or --extra-index-url line, a [tool.uv] index or sources setting, a Pipfile source), so these may not be PyPI's packages and their names aren't sent to pypi.org: ${some(privateIndex)}. To check them on PyPI's files, run uvx wheelgap ${r.lockfile} in a checkout.` }));
+    alerts.push(el("p", { class: "alert warn", text: `Not checked: ${r.lockfile} names an index or source other than PyPI (an --index-url or --extra-index-url line, a [tool.uv] index or sources setting, a Pipfile source), so these may not be PyPI's packages and their names aren't sent to pypi.org: ${some(privateIndex)}. ${lookedUpByCli ? `uvx wheelgap ${r.lockfile} in a checkout checks them on PyPI's files.` : "To check them on that index, run uvx wheelgap --index-url with its URL in a checkout."}` }));
   }
   const skipped = r.skipped.filter((name) => !privateIndex.includes(name));
   if (skipped.length) {
@@ -392,7 +399,8 @@ function renderTable() {
   const body = el("tbody", {}, ...shown.map((row) => {
     const f = fixFor(row, state.fixes);
     const gapWheelFix = f.kind === "none" || f.kind === "loses" ? gapWheelFixText(row, state.gapWheels) : null;
-    const fixText = gapWheelFix ?? (f.kind === "pending" ? (state.fixesDone ? "not looked up" : "…") : FIX_TEXT[f.kind](f));
+    // An unknown-only row can say why (a package an extra index may serve instead of PyPI's).
+    const fixText = gapWheelFix ?? (f.kind === "pending" ? (state.fixesDone ? "not looked up" : "…") : f.kind === "unchecked" && row.reason ? row.reason : FIX_TEXT[f.kind](f));
     return el("tr", {},
       el("td", { class: "pkg" }, el("a", { href: `https://pypi.org/project/${encodeURIComponent(row.name)}/${encodeURIComponent(row.version || "")}`, rel: "noopener", text: row.name }), el("span", { class: "ver", text: row.version || "" })),
       ...labels.map((t) => {

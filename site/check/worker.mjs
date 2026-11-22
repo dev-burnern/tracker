@@ -126,7 +126,7 @@ async function load(r, id) {
     throw new Failure("stale", "superseded by a newer load"); // the page has moved on and ignores this
   }
   for (const old of [...loaded.keys()]) forget(py, old);
-  loaded.set(root, { ...r, ref, root, fetched: new Set() });
+  loaded.set(root, { ...r, ref, root, fetched: new Set(), configs: plan.configs });
   return { plan, detected, truncated: Boolean(tree.truncated), ref, root };
 }
 
@@ -146,6 +146,13 @@ function dropOtherProjects(py, repo, lockfile) {
   }
 }
 
+// The repo's installer settings files (plan()'s `configs`), which the driver needs before it takes an extra index as
+// public: it never fetches them, so it refuses when one is beside the file or above it. Always a string, and "null"
+// (refuse) when the list is missing.
+function configsJson(repo) {
+  return JSON.stringify(Array.isArray(repo.configs) ? repo.configs : null);
+}
+
 // Asks the driver which packages a lookups file (requirements file, pyproject.toml, Pipfile.lock, pixi.lock)
 // needs looked up, fetching its includes (-r, -c) from the same repo and ref when it names them. An include
 // that's a URL, or outside the repo, comes back as an error naming it and stops here. A file wheelgap can't read
@@ -156,7 +163,7 @@ async function lookups(id, repo, lockfile) {
   for (let tries = 0; tries < 10; tries++) {
     if (id !== latestCheck) throw new Failure("stale", "superseded by a newer check");
     dropOtherProjects(py, repo, lockfile);
-    const n = JSON.parse(driver.needs(repo.root, lockfile));
+    const n = JSON.parse(driver.needs(repo.root, lockfile, configsJson(repo)));
     if (!n.error) return n.lookups ?? [];
     if (n.kind !== "include") return [];
     if (!n.path || repo.fetched.has(n.path)) throw new Failure("file", n.error);
@@ -215,7 +222,7 @@ async function check(id, root, lockfile, options) {
   post({ id, type: "progress", stage: "checking" });
   dropOtherProjects(py, repo, lockfile); // again: a check that this one superseded may have fetched one since
   // Always a string: Pyodide may hand a JS null to Python as something other than None.
-  const result = JSON.parse(driver.check(repo.root, lockfile, JSON.stringify(options), JSON.stringify(fetched)));
+  const result = JSON.parse(driver.check(repo.root, lockfile, JSON.stringify(options), JSON.stringify(fetched), configsJson(repo)));
   if (!result.error) result.missed = missed;
   return result;
 }

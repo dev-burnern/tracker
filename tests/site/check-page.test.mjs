@@ -92,6 +92,7 @@ function workerCheck({ needs, fetch, releases = new Map(), lockfile = "requireme
     let latestCheck = 7;
     class Failure extends Error { constructor(kind, message) { super(message); this.kind = kind; } }
     ${fn("pool")}
+    ${fn("configsJson")}
     ${fn("lookups")}
     ${fn("dropOtherProjects")}
     ${fn("check")}
@@ -338,7 +339,21 @@ test("renderVerdict alerts on public extra indexes and avoids --index-url advice
     extraAlerts.includes("requirements.txt also installs from download.pytorch.org (--extra-index-url). This page checked PyPI only."),
   );
 
-  const privAlerts = run({ private: ["corp-pkg"], skipped: ["corp-pkg"] });
-  assert.ok(privAlerts.some((t) => t.includes("run uvx wheelgap requirements.txt in a checkout")));
+  // The packages the extra index may serve are named, as unknown.
+  const torch = { name: "torch", version: "2.6.0", gaps: [], unknown: ["3.13 linux-x86_64"], statuses: {}, reason: "may be installed from download.pytorch.org, which this page doesn't read" };
+  const named = run({ extra_indexes: ["download.pytorch.org"], rows: [torch], packages: 3 });
+  assert.ok(named.includes("requirements.txt also installs from download.pytorch.org (--extra-index-url). This page checked PyPI only. torch may be installed from there instead, so it's shown as unknown."), named.join("\n"));
+
+  const privAlerts = run({ private: ["corp-pkg"], skipped: ["corp-pkg"], reader: "requirements" });
+  assert.ok(privAlerts.some((t) => t.includes("uvx wheelgap requirements.txt in a checkout checks them on PyPI's files")));
   assert.ok(privAlerts.every((t) => !t.includes("run uvx wheelgap --index-url")));
+  // A Pipfile.lock that pins a package to its own index: the CLI skips that one too, so --index-url is still the way.
+  const pipfile = run({ lockfile: "Pipfile.lock", private: ["corp-pkg"], skipped: ["corp-pkg"], reader: "pipfile", looked_up: true });
+  assert.ok(pipfile.some((t) => t.includes("run uvx wheelgap --index-url with its URL in a checkout")));
+});
+
+test("an unknown row's reason is its Fix text, so a touch screen shows it too", () => {
+  const source = read("check.mjs");
+  assert.match(source, /f\.kind === "unchecked" && row\.reason \? row\.reason : FIX_TEXT\[f\.kind\]\(f\)/);
+  assert.equal(checkLogic.fixFor({ name: "torch", gaps: [], unknown: ["3.14 linux-x86_64"], lookup: false }, {}).kind, "unchecked");
 });

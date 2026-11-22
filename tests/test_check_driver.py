@@ -133,6 +133,8 @@ def test_plan_picks_files_like_suggest_targets():
     assert plan["dockerfiles"] == ["Dockerfile", "deploy/Containerfile"]
     assert plan["templates"] == ["deploy/Dockerfile.j2"]
     assert plan["python_version"] == ".python-version"
+    # Every installer settings file, for the extra-index check (the browser never fetches the ones it doesn't check).
+    assert plan["configs"] == ["backend/pyproject.toml", "pyproject.toml"]
 
 
 def test_detect_reads_ci_and_dockerfiles(repo):
@@ -339,56 +341,135 @@ def test_needs_skips_private_index_packages(tmp_path):
     assert r["private"] == ["fastlib", "numpy"] and r["packages"] == 0 and r["rows"] == []
 
 
+TORCH_LINE = "--extra-index-url https://download.pytorch.org/whl/cu128\n"
+NO_CONFIGS = "[]"  # plan()'s `configs` for a repo with no uv.toml, pyproject.toml or pdm.toml
+
+
 def test_pytorch_extra_index_checks_pypi_packages_and_marks_torch_unknown(tmp_path):
     (tmp_path / "requirements.txt").write_text(
-        "--extra-index-url https://download.pytorch.org/whl/cu128\n"
-        "torch==2.6.0\n"
-        "torchvision==0.21.0\n"
-        "purewheel==3.1\n",
+        TORCH_LINE + "torch==2.6.0\ntorchvision==0.21.0\npurewheel==3.1\n",
         encoding="utf-8",
     )
-    needed = json.loads(driver.needs(str(tmp_path), "requirements.txt"))
+    needed = json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))
     assert needed["lookups"] == [{"name": "purewheel", "version": "3.1"}]
 
     lookups = {
         "purewheel==3.1": {"info": {"version": "3.1"}, "urls": [{"filename": "purewheel-3.1-py3-none-any.whl"}]},
     }
-    res = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), json.dumps(lookups)))
+    res = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), json.dumps(lookups), NO_CONFIGS))
     assert res["private"] == []
-    assert res["extra_indexes"] == ["download.pytorch.org"]
+    assert res["extra_indexes"] == ["download.pytorch.org"] and res["reader"] == "requirements"
     assert res["packages"] == 3
     by_name = {row["name"]: row for row in res["rows"]}
     assert set(by_name) == {"torch", "torchvision"}
     assert by_name["torch"]["gaps"] == []
     assert len(by_name["torch"]["unknown"]) == 3
     assert by_name["torch"]["reason"] == "may be installed from download.pytorch.org, which this page doesn't read"
+    # Written with "=", and with a comment after it, pip reads the same one extra index.
+    for line in ("--extra-index-url=https://download.pytorch.org/whl/cpu\n", TORCH_LINE.strip() + "  # CUDA 12.8\n"):
+        (tmp_path / "requirements.txt").write_text(line + "purewheel==3.1\n", encoding="utf-8")
+        assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["total"] == 1, line
 
     # Adding --index-url alongside PyTorch's --extra-index-url keeps the whole file private.
     (tmp_path / "requirements.txt").write_text(
-        "--extra-index-url https://download.pytorch.org/whl/cu128\n"
-        "--index-url https://private.example/simple\n"
-        "purewheel==3.1\n",
+        TORCH_LINE + "--index-url https://private.example/simple\npurewheel==3.1\n",
         encoding="utf-8",
     )
-    assert json.loads(driver.needs(str(tmp_path), "requirements.txt"))["lookups"] == []
-    priv = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), "{}"))
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == []
+    priv = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), "{}", NO_CONFIGS))
     assert priv["private"] == ["purewheel"] and priv["extra_indexes"] == []
 
     # Credentials in a listed host's URL keep the file private, and the URL never appears in the result.
     secret_url = "https://user:s3cr3t@download.pytorch.org/whl/cu128"
     (tmp_path / "requirements.txt").write_text(f"--extra-index-url {secret_url}\npurewheel==3.1\n", encoding="utf-8")
-    assert json.loads(driver.needs(str(tmp_path), "requirements.txt"))["lookups"] == []
-    raw_res = driver.check(str(tmp_path), "requirements.txt", options(), "{}")
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == []
+    raw_res = driver.check(str(tmp_path), "requirements.txt", options(), "{}", NO_CONFIGS)
     assert "s3cr3t" not in raw_res and secret_url not in raw_res
     assert json.loads(raw_res)["private"] == ["purewheel"]
 
     # An --extra-index-url in an included file is recognized too.
-    (tmp_path / "torch.txt").write_text("--extra-index-url https://download.pytorch.org/whl/cpu\ntorch==2.6.0\n", encoding="utf-8")
+    (tmp_path / "torch.txt").write_text(
+        "--extra-index-url https://download.pytorch.org/whl/cpu\ntorch==2.6.0\n", encoding="utf-8"
+    )
     (tmp_path / "requirements.txt").write_text("-r torch.txt\npurewheel==3.1\n", encoding="utf-8")
-    inc_needed = json.loads(driver.needs(str(tmp_path), "requirements.txt"))
+    inc_needed = json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))
     assert inc_needed["lookups"] == [{"name": "purewheel", "version": "3.1"}]
-    inc_res = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), json.dumps(lookups)))
+    inc_res = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), json.dumps(lookups), NO_CONFIGS))
     assert inc_res["extra_indexes"] == ["download.pytorch.org"] and inc_res["private"] == []
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # Each is read by pip 25.3 as another index, a find-links folder, no index, or an include that names one
+        # (checked with pip's own requirements parser), so with the PyTorch line the file must stay private.
+        "-ihttps://corp.example/simple\n",
+        "-f./wheels\n",
+        "--index https://corp.example/simple\n",
+        "--extra https://corp.example/simple\n",
+        "--no-i\n",
+        "-rcorp.txt\n",
+        "--requirem corp.txt\n",
+        "-c https://corp.example/constraints.txt\n",
+        "--extra-index-url https://pypi.example.org/simple\n",  # another host
+        "--extra-index-url https://download.pytorch.org.evil.example/whl\n",
+        "--extra-index-url https://download.pytorch.org:8443/whl/cu128\n",
+        "--extra-index-url ${TORCH_INDEX}\n",
+        '--extra-index-url "https://download.pytorch.org/whl/cu128"\n',
+        "--extra-index-url https://download.pytorch.org/whl/cu128 --pre\n",
+        "--extra-index-url https://download.pytorch.org/whl/cu128 \\\n --index-url https://corp.example/simple\n",
+    ],
+)
+def test_any_index_option_but_a_whole_pytorch_line_keeps_the_file_private(tmp_path, lines):
+    (tmp_path / "corp.txt").write_text("--index-url https://corp.example/simple\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text(TORCH_LINE + lines + "purewheel==3.1\n", encoding="utf-8")
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == []
+    r = json.loads(driver.check(str(tmp_path), "requirements.txt", options(), "{}", NO_CONFIGS))
+    assert "error" not in r, r
+    assert "purewheel" in r["private"] and r["extra_indexes"] == []
+
+
+def test_a_byte_order_mark_doesnt_hide_a_first_line_index(tmp_path):
+    # wheelgap reads requirements files as utf-8-sig, as pip decodes them; read as plain utf-8, the first line would
+    # start with U+FEFF and not read as an option at all.
+    (tmp_path / "requirements.txt").write_bytes(
+        b"\xef\xbb\xbf--index-url https://corp.example/simple\n" + TORCH_LINE.encode() + b"purewheel==3.1\n"
+    )
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == []
+    assert json.loads(driver.check(str(tmp_path), "requirements.txt", options(), "{}", NO_CONFIGS))["private"] == [
+        "purewheel"
+    ]
+
+
+@pytest.mark.parametrize(
+    "configs",
+    [
+        None,  # the worker didn't say which settings files the repo has: nothing is certain
+        '["pyproject.toml"]',  # beside the file in the repo, but never fetched, so its [tool.uv] can't be read
+        '["uv.toml"]',
+        '["app/pdm.toml", "other/pyproject.toml"]',
+        "{}",
+    ],
+)
+def test_an_installer_settings_file_the_page_didnt_read_keeps_the_file_private(tmp_path, configs):
+    (tmp_path / "requirements.txt").write_text(TORCH_LINE + "purewheel==3.1\n", encoding="utf-8")
+    private = configs != '["app/pdm.toml", "other/pyproject.toml"]'
+    n = json.loads(driver.needs(str(tmp_path), "requirements.txt", configs))
+    assert n["lookups"] == ([] if private else [{"name": "purewheel", "version": "3.1"}]), configs
+    # One in a subfolder isn't above the file, so it doesn't count; one above a nested file does.
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "requirements.txt").write_text(TORCH_LINE + "purewheel==3.1\n", encoding="utf-8")
+    nested = json.loads(driver.needs(str(tmp_path), "app/requirements.txt", '["pyproject.toml", "app/x/uv.toml"]'))
+    assert nested["lookups"] == []
+    assert json.loads(driver.needs(str(tmp_path), "app/requirements.txt", '["app/x/uv.toml"]'))["total"] == 1
+
+
+def test_an_installer_settings_file_on_disk_that_names_an_index_keeps_the_file_private(tmp_path):
+    (tmp_path / "requirements.txt").write_text(TORCH_LINE + "purewheel==3.1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\n[[tool.uv.index]]\nurl = "https://corp.example/simple"\n', encoding="utf-8"
+    )
+    assert json.loads(driver.needs(str(tmp_path), "requirements.txt", NO_CONFIGS))["lookups"] == []
 
 
 def test_needs_reads_a_pyprojects_direct_requirements(tmp_path):
