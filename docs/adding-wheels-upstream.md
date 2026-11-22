@@ -50,8 +50,9 @@ The [free-threaded Python 3.14 campaign](https://wheelgap.github.io/tracker/camp
 
 The [Python 3.15 on Windows x64 campaign](https://wheelgap.github.io/tracker/campaigns/py315-windows/) lists the most-downloaded packages that ship a `win_amd64` wheel for Python 3.14 but none for 3.15. The specifics:
 
-- **cibuildwheel config.** Upgrade `pypa/cibuildwheel` to a release that includes CPython 3.15, and make sure `CIBW_BUILD` / `CIBW_SKIP` doesn't exclude `cp315-*` or cap the Python version at 3.14. While 3.15 is in pre-release, opt in with [`CIBW_ENABLE: cpython-prerelease`](https://cibuildwheel.pypa.io/en/stable/options/#enable) (or `enable = ["cpython-prerelease"]` in `pyproject.toml`) to build and test `cp315-win_amd64` before the final release ([PEP 790](https://peps.python.org/pep-0790/)).
-- **Testing before 3.15 is final.** In GitHub Actions, `actions/setup-python` accepts `python-version: "3.15"` with `allow-prereleases: true` on `windows-latest`, and `CIBW_TEST_COMMAND` runs the test suite against the built `cp315-win_amd64` wheel.
+- **cibuildwheel config.** Python 3.15 is released, so a current `pypa/cibuildwheel` builds `cp315-win_amd64` without any opt-in; check its [changelog](https://cibuildwheel.pypa.io/en/stable/changelog/) if the project pins an older one. Then make sure `CIBW_BUILD` / `CIBW_SKIP`, `CIBW_PROJECT_REQUIRES_PYTHON` and the package's own `requires-python` don't stop at 3.14.
+- **Usual blockers:** a bindings tool older than 3.15 (an old PyO3 refuses to build for a Python it doesn't know, and old Cython releases can fail on a new Python's C API).
+- **Testing.** Set `CIBW_TEST_COMMAND` (or `test-command` in `pyproject.toml`) so cibuildwheel installs and tests each built `cp315-win_amd64` wheel in its own environment, and add `"3.15"` to the project's usual `actions/setup-python` test matrix on `windows-latest`.
 - **Checking a release:** `uvx wheelgap <name>==<version> -p 3.15 -t win-amd64`.
 
 Keep the change to the workflow and the project’s existing test suite. Don’t add a new backend or rewrite the package’s build unless the maintainers ask for that.
