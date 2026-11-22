@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  parseRepo, rawUrl, pickLockfile, pickRequestedFile, isReadableFile, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
+  parseRepo, rawUrl, pickLockfile, pickRequestedFile, isReadableFile, fileKind, toQuery, fromQuery, sortPythons, freeThreaded, fixFor, rowsFor, headline,
   cliCommand, fixPrompt, verdictText, nextSteps, validRef, labVerdict, labFor, canonicalName, gapWheelFor,
   gapWheelFixText, withoutUnreadable, unreadableReason, tileText, missedText, badgeMarkdown, trimProject, trimReleases,
 } from "../../site/check/check-logic.mjs";
@@ -97,10 +97,33 @@ test("pickRequestedFile checks a named file, adds a readable one from the tree, 
   assert.equal(missing.notice, "requirements/gone.txt wasn't found in this repository.");
   assert.equal(pickRequestedFile(locks, "setup.cfg", true, null).notice, "setup.cfg isn't a file this page reads.");
   assert.deepEqual(pickRequestedFile([], "setup.cfg", true, null), { lock: null, lockfiles: [], auto: true, notice: "setup.cfg isn't a file this page reads." });
-  for (const yes of ["uv.lock", "a/Pipfile.lock", "pixi.lock", "pylock.dev.toml", "script.py.lock", "requirements-dev.lock", "x/reqs.in", "pyproject.toml"]) {
+  for (const yes of ["uv.lock", "a/Pipfile.lock", "pixi.lock", "pylock.dev.toml", "uv-py312.lock", "requirements-dev.lock", "x/reqs.in", "pyproject.toml"]) {
     assert.equal(isReadableFile(yes), true, yes);
   }
-  for (const no of ["setup.cfg", "README.md", "setup.py", "Cargo.lock"]) assert.equal(isReadableFile(no), false, no);
+  // script.py.lock: the pinned wheelgap 0.13.0 doesn't read a script's lock ("don't know how to read"), so it's
+  // refused here with the fallback, never checked and reported as unreadable.
+  for (const no of ["setup.cfg", "README.md", "setup.py", "Cargo.lock", "script.py.lock", "report.json", "pipfile.lock"]) {
+    assert.equal(isReadableFile(no), false, no);
+  }
+  assert.equal(pickRequestedFile(locks, "scripts/tool.py.lock", true, null).notice, "scripts/tool.py.lock isn't a file this page reads.");
+});
+
+test("a named file is checked offline exactly when wheelgap reads it as a lockfile that lists its files", () => {
+  // As sources.file_kind in wheelgap 0.13.0, and driver.py's OFFLINE_KINDS: by the reader its name picks, not by an
+  // exact name, so a pylock.dev.toml or uv-py312.lock isn't read as a lookups file (its left-out Pythons would show
+  // false gaps), and a requirements-dev.lock is still looked up.
+  const kinds = {
+    "uv.lock": "uv", "a/pylock.toml": "pylock", "poetry.lock": "poetry", "pdm.lock": "pdm", "Pipfile.lock": "pipfile",
+    "pixi.lock": "pixi", "pyproject.toml": "pyproject", "pylock.dev.toml": "pylock", "uv-py312.lock": "uv",
+    "requirements-dev.lock": "requirements", "requirements.uv.lock": "requirements", "x/dev.txt": "requirements",
+    "reqs.in": "requirements", "script.py.lock": null, "REQS.TXT": null, "report.json": null,
+  };
+  for (const [path, kind] of Object.entries(kinds)) assert.equal(fileKind(path), kind, path);
+  const offline = (path) => pickRequestedFile([], path, true, null).lock.offline;
+  for (const path of ["pylock.dev.toml", "envs/uv-py312.lock", "tests/poetry.lock", "examples/pdm.lock"]) assert.equal(offline(path), true, path);
+  for (const path of ["requirements-dev.lock", "requirements.uv.lock", "a/Pipfile.lock", "b/pixi.lock", "c/pyproject.toml", "reqs.in"]) {
+    assert.equal(offline(path), false, path);
+  }
 });
 
 test("rawUrl encodes each path segment", () => {

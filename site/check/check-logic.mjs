@@ -97,16 +97,29 @@ export function pickLockfile(lockfiles, dir) {
   return lockfiles.find(inDir) ?? lockfiles[0] ?? null;
 }
 
-const LOCK_NAMES = ["uv.lock", "poetry.lock", "pdm.lock", "pylock.toml", "Pipfile.lock", "requirements.txt", "pixi.lock"];
-const OFFLINE_NAMES = ["uv.lock", "pylock.toml", "poetry.lock", "pdm.lock"];
-
-// Whether a file path not listed by plan() is one wheelgap reads by its name (as wheelgap's sources.file_kind does):
-// a lockfile (also in a folder plan() skips, or past its limit), a requirements file (*.txt, *.in) or pyproject.toml.
-export function isReadableFile(path) {
+// wheelgap 0.13.0's sources.file_kind, which picks a file's reader by its name: the reader, or null for a name it
+// doesn't read (and a pip report's .json, which this page doesn't offer). Re-check it when worker.mjs's pin changes:
+// later releases read more names (a PEP 723 script's *.py.lock), which 0.13.0 refuses as "don't know how to read".
+const KINDS = { "uv.lock": "uv", "pylock.toml": "pylock", "poetry.lock": "poetry", "pdm.lock": "pdm", "Pipfile.lock": "pipfile", "pixi.lock": "pixi" };
+export function fileKind(path) {
   const base = String(path ?? "").split("/").pop();
-  return LOCK_NAMES.includes(base) || base === "pyproject.toml" || /\.(txt|in)$/.test(base)
-    || (base.startsWith("pylock.") && base.endsWith(".toml")) || base.endsWith(".py.lock")
-    || (base.startsWith("requirements") && base.endsWith(".lock")) || (base.endsWith(".lock") && base.includes("uv"));
+  if (base === "pyproject.toml") return "pyproject";
+  if (Object.hasOwn(KINDS, base)) return KINDS[base];
+  if (base.startsWith("pylock.") && base.endsWith(".toml")) return "pylock";
+  if (base.startsWith("requirements") && base.endsWith(".lock")) return "requirements";
+  if (base.endsWith(".lock") && base.includes("uv")) return "uv";
+  if (base.endsWith(".txt") || base.endsWith(".in")) return "requirements";
+  return null;
+}
+
+// The readers whose lockfiles list each package's files, so the page checks them offline (driver.py's OFFLINE_KINDS,
+// which decides by the same rule: a pylock.dev.toml is read like a pylock.toml, never as a lookups file).
+const OFFLINE_KINDS = ["uv", "pylock", "poetry", "pdm"];
+
+// Whether a file path not listed by plan() is one wheelgap reads by its name: a lockfile (also in a folder plan()
+// skips, or past its limit), a requirements file (*.txt, *.in) or pyproject.toml.
+export function isReadableFile(path) {
+  return fileKind(path) !== null;
 }
 
 // Pick the file to check when a link or query may have named one explicitly.
@@ -122,7 +135,7 @@ export function pickRequestedFile(lockfiles, requested, inTree, dir) {
     return { lock: existing, lockfiles, auto: false, notice: null };
   }
   if (inTree && isReadableFile(requested)) {
-    const added = { path: requested, offline: OFFLINE_NAMES.includes(requested.split("/").pop()), added: true };
+    const added = { path: requested, offline: OFFLINE_KINDS.includes(fileKind(requested)), added: true };
     return { lock: added, lockfiles: [...lockfiles, added], auto: false, notice: null };
   }
   const notice = !isReadableFile(requested)

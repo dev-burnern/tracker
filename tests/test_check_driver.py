@@ -182,6 +182,50 @@ def test_check_doesnt_count_pythons_outside_the_lock(repo):
     assert r["per_target"]["3.14 linux-x86_64"] == {"wheel": 0, "source": 0, "missing": 0, "unknown": 0}
 
 
+PYLOCK = """\
+lock-version = "1.0"
+created-by = "pip"
+requires-python = ">=3.13, <3.14"
+
+[[packages]]
+name = "fastlib"
+version = "2.0.0"
+wheels = [
+    { name = "fastlib-2.0.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", url = "https://files.pythonhosted.org/packages/aa/fastlib-2.0.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hashes = { sha256 = "00" } },
+]
+"""
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("uv-py312.lock", LOCK.replace('">=3.13"', '">=3.13, <3.14"')),
+        ("envs/pylock.dev.toml", PYLOCK),
+    ],
+)
+def test_a_lockfile_named_by_its_reader_is_checked_offline(repo, name, text):
+    # A link can name a lockfile plan() doesn't list. wheelgap reads it by the reader its name picks (file_kind):
+    # checked as a lookups file, the Python its lock leaves out (3.14) would show false gaps, not `outside_lock`.
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+    (repo / name).write_text(text, encoding="utf-8")
+    assert json.loads(driver.needs(str(repo), name)) == {"lookups": [], "total": 0}
+    r = json.loads(driver.check(str(repo), name, options(pythons=["3.13", "3.14"]), "{}"))
+    assert "error" not in r, r
+    assert r["looked_up"] is False and r["outside_lock"] == ["3.14"]
+    assert all(g.startswith("3.13 ") for row in r["rows"] for g in row["gaps"])
+    assert r["per_target"]["3.14 linux-x86_64"] == {"wheel": 0, "source": 0, "missing": 0, "unknown": 0}
+
+
+def test_offline_follows_the_reader_not_the_exact_name():
+    offline = {
+        "uv.lock": True, "a/pylock.toml": True, "poetry.lock": True, "pdm.lock": True, "pylock.dev.toml": True,
+        "uv-py312.lock": True, "Pipfile.lock": False, "pixi.lock": False, "pyproject.toml": False,
+        "requirements.txt": False, "requirements-dev.lock": False, "requirements.uv.lock": False, "dev.in": False,
+        "script.py.lock": False, "README.md": False,
+    }
+    assert {p: driver._reads_offline(p) for p in offline} == offline
+
+
 def test_check_refuses_lockfiles_that_need_an_index(repo):
     assert json.loads(driver.check(str(repo), "uv.lock", options(platforms=["amiga"])))["kind"] == "targets"
     (repo / "uv.lock").write_text("not toml [", encoding="utf-8")

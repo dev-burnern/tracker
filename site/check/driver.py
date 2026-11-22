@@ -24,7 +24,7 @@ from packaging.utils import canonicalize_name
 from wheelgap import api, offline, origin, pypi, suggest_targets
 from wheelgap import suggest as release_suggest
 from wheelgap.check import Row, Status
-from wheelgap.sources import LOCKFILES, Package, Source, SourceError, load_file, pythons_outside_lock
+from wheelgap.sources import LOCKFILES, Package, Source, SourceError, file_kind, load_file, pythons_outside_lock
 from wheelgap.targets import DEFAULT_PLATFORMS, NEWEST_PYTHON, Target, TargetError
 
 # The lockfiles that list each package's files, so they can be checked without asking an index. The other
@@ -34,6 +34,10 @@ from wheelgap.targets import DEFAULT_PLATFORMS, NEWEST_PYTHON, Target, TargetErr
 # requirements only, as `uvx wheelgap requirements.txt` checks them. And even a listed lockfile can leave a
 # package's files out; check() catches that below.
 OFFLINE = ("uv.lock", "pylock.toml", "poetry.lock", "pdm.lock")
+# The readers of those lockfiles (sources.file_kind's names for them). A file a link names is read by the reader its
+# name picks (pylock.dev.toml as a pylock.toml, uv-py312.lock as a uv.lock), so it's checked offline by that, not by
+# its exact name: read as a lookups file, a Python its lock leaves out would show false gaps.
+OFFLINE_KINDS = ("uv", "pylock", "poetry", "pdm")
 LOOKUPS = tuple(name for name in LOCKFILES if name not in OFFLINE) + ("pyproject.toml",)
 GAPS = (Status.SOURCE, Status.MISSING)  # no wheel; UNKNOWN (couldn't be checked) is reported apart
 MAX_LOCKFILES = 30
@@ -83,6 +87,14 @@ def gap_wheels(list_json: str) -> str:
     )
 
 
+def _reads_offline(path: str) -> bool:
+    """Whether wheelgap reads `path` as a lockfile that lists its packages' files (OFFLINE_KINDS), by its name."""
+    try:
+        return file_kind(Path(path)) in OFFLINE_KINDS
+    except SourceError:  # a name wheelgap doesn't read: load_file reports it
+        return False
+
+
 def _skipped_folder(parts: tuple[str, ...]) -> bool:
     """A folder wheelgap --suggest-targets doesn't look in (hidden, node_modules, ...), or a vendored test fixture."""
     return any(p.startswith(".") or p in suggest_targets._SKIP_DIRS for p in parts)
@@ -121,7 +133,7 @@ def plan(paths_json: str) -> str:
     dockerfiles.sort(key=lambda p: (p.count("/"), p))
     return json.dumps(
         {
-            "lockfiles": [{"path": p, "offline": PurePosixPath(p).name in OFFLINE} for p in lockfiles[:MAX_LOCKFILES]],
+            "lockfiles": [{"path": p, "offline": _reads_offline(p)} for p in lockfiles[:MAX_LOCKFILES]],
             "workflows": sorted(workflows),
             "dockerfiles": dockerfiles[:MAX_DOCKERFILES],
             "more_dockerfiles": max(0, len(dockerfiles) - MAX_DOCKERFILES),
@@ -221,7 +233,7 @@ def needs(root: str, path: str) -> str:
     as an error of kind `include` with its `path` in the repo, and the worker fetches it and asks again. One outside
     the repo has no `path`. Any other error is left to check(), which reports it.
     """
-    if PurePosixPath(path).name in OFFLINE:
+    if _reads_offline(path):
         return json.dumps({"lookups": [], "total": 0})
     try:
         source = load_file(Path(root) / path)
@@ -292,7 +304,7 @@ def check(root: str, lockfile: str, options_json: str, lookups_json: str | None 
         source = load_file(path)
     except (SourceError, ValueError, OSError) as e:  # ValueError: a lockfile that isn't valid TOML or JSON
         return json.dumps({"error": str(e).replace(f"{root}/", ""), "kind": "source"})
-    looked_up = path.name not in OFFLINE
+    looked_up = not _reads_offline(lockfile)
     if looked_up:
         _fill_lookups(source, targets, json.loads(lookups_json) if lookups_json else {})
         # As api._check_lockfile() builds them, which can't be asked: it refuses a pyproject.toml and does its own
