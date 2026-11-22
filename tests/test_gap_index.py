@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -87,7 +88,7 @@ class Index(unittest.TestCase):
             "schema": 1,
             "wheels": [
                 {"project": "tiktoken", "wheel": "tiktoken-0.14.0-cp314-cp314-win_arm64.whl", "status": "in-index"},
-                {"project": "tiktoken", "wheel": "tiktoken-0.13.0-cp314-cp314-win_arm64.whl", "status": "yanked"},
+                {"project": "tiktoken", "wheel": "tiktoken-0.13.0-cp314-cp314-win_arm64.whl", "status": "yanked", "yank_reason": "broken <build>"},
                 {"project": "tiktoken", "wheel": "tiktoken-0.12.0-cp314-cp314-win_arm64.whl", "status": "withdrawn-pypi-has-wheel"},
                 {"project": "gonepkg", "wheel": "gonepkg-1.0.0-cp314-cp314-win_arm64.whl", "status": "withdrawn-pypi-has-wheel"},
             ],
@@ -105,6 +106,24 @@ class Index(unittest.TestCase):
         self.assertIn("tiktoken-0.14.0-cp314-cp314-win_arm64.whl", page)
         self.assertIn("tiktoken-0.13.0-cp314-cp314-win_arm64.whl", page)
         self.assertNotIn("tiktoken-0.12.0-cp314-cp314-win_arm64.whl", page)
+        # A yanked wheel is marked as wheelgap/wheels' own index marks it (PEP 592), so pip skips it there too unless
+        # a requirement pins that exact version; an in-index one isn't.
+        links = {re.search(r">([^<>]+\.whl)</a>", line).group(1): line for line in page.splitlines() if "<a href=" in line}
+        self.assertIn(' data-yanked="broken &lt;build&gt;">', links["tiktoken-0.13.0-cp314-cp314-win_arm64.whl"])
+        self.assertNotIn("data-yanked", links["tiktoken-0.14.0-cp314-cp314-win_arm64.whl"])
+
+    def test_a_yanked_wheel_with_no_reason_is_marked_with_an_empty_one(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "gap-wheels.json").write_text(json.dumps({"schema": 1, "wheels": [wheel()]}))
+        (tmp / "status.json").write_text(json.dumps({"schema": 1, "wheels": [
+            {"project": "tiktoken", "wheel": "tiktoken-0.14.0-cp314-cp314-win_arm64.whl", "status": "yanked", "yank_reason": None},
+        ]}))
+        self.assertEqual(build_gap_index.build(tmp / "gap-wheels.json", tmp / "site", tmp / "status.json"), 0)
+        page = (tmp / "site/wheels/simple/tiktoken/index.html").read_text()
+        self.assertIn('win_arm64.whl#sha256=', page)
+        self.assertIn(' data-yanked="">tiktoken-0.14.0-cp314-cp314-win_arm64.whl</a>', page)
+        # The transparency record is copied as it came, with no marker added to it.
+        self.assertNotIn("_yanked", (tmp / "site/data/gap-wheels.json").read_text())
 
     def test_missing_or_malformed_status_warns_and_matches_legacy_output(self):
         wheels = [wheel()]

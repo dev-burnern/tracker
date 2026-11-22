@@ -39,8 +39,9 @@ def canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def read_gap_status(path: Path | None) -> dict[tuple[str, str], str] | None:
-    """Current status by (canonical project, wheel filename), or None for the legacy fallback."""
+def read_gap_status(path: Path | None) -> dict[tuple[str, str], dict] | None:
+    """status.json's entry by (canonical project, wheel filename), or None for the legacy fallback. Validated as
+    build_pages.read_gap_status validates it."""
     if path is None:
         return None
     try:
@@ -61,7 +62,7 @@ def read_gap_status(path: Path | None) -> dict[tuple[str, str], str] | None:
     ):
         print("::warning::status.json is missing or unusable, so the legacy gap index uses gap-wheels.json alone")
         return None
-    return {(canonical(item["project"]), item["wheel"]): item["status"] for item in data["wheels"]}
+    return {(canonical(item["project"]), item["wheel"]): item for item in data["wheels"]}
 
 
 def usable(w: object) -> bool:
@@ -77,14 +78,21 @@ def usable(w: object) -> bool:
     )
 
 
-def projects(wheels: list, statuses: dict[tuple[str, str], str] | None = None) -> dict[str, list[dict]]:
+def projects(wheels: list, statuses: dict[tuple[str, str], dict] | None = None) -> dict[str, list[dict]]:
+    """The usable wheels by project. With a status.json, only the ones the index serves (in-index or yanked), a
+    yanked one carrying its yank reason (`_yanked`, "" for none) so its link is marked as wheelgap/wheels marks it."""
     out: dict[str, list[dict]] = {}
     for w in wheels:
         if not usable(w):
             continue
         proj = canonical(w["name"])
-        if statuses is not None and statuses.get((proj, w["wheel"])) not in SERVED_STATUSES:
-            continue
+        if statuses is not None:
+            entry = statuses.get((proj, w["wheel"]))
+            if entry is None or entry["status"] not in SERVED_STATUSES:
+                continue
+            if entry["status"] == "yanked":
+                reason = entry.get("yank_reason")
+                w = {**w, "_yanked": reason if isinstance(reason, str) else ""}
         out.setdefault(proj, []).append(w)
     return {k: sorted(v, key=lambda w: w["wheel"]) for k, v in sorted(out.items())}
 
@@ -110,6 +118,9 @@ def project_links(wheels: list[dict]) -> list[str]:
     for w in wheels:
         rp = w.get("requires_python")
         attr = f' data-requires-python="{e(rp)}"' if isinstance(rp, str) and rp.strip() else ""
+        # PEP 592, as the new index marks it: pip skips a yanked wheel unless a requirement pins its exact version.
+        if isinstance(w.get("_yanked"), str):
+            attr += f' data-yanked="{e(w["_yanked"])}"'
         links.append(f'<a href="{e(RELEASE_URL + w["wheel"])}#sha256={w["sha256"]}"{attr}>{e(w["wheel"])}</a>')
     return links
 
