@@ -194,7 +194,8 @@ function onResult(result) {
     return runCheck();
   }
   if (result.error) {
-    status(result.kind === "source" ? `wheelgap couldn't read ${state.lockfile}: ${result.error}` : result.error, true);
+    const notice = state.fileNotice ? `${state.fileNotice} Checked ${state.lockfile} instead, and ` : "";
+    status(result.kind === "source" ? `${notice}${notice ? "w" : "W"}heelgap couldn't read ${state.lockfile}: ${result.error}` : `${notice}${result.error}`, true);
     return;
   }
   state.result = result;
@@ -222,7 +223,7 @@ function needsIndex(path) {
   status("");
   $("verdict").textContent = `${path.split("/").pop()} needs PyPI lookups`;
   $("verdict-detail").textContent = `It doesn't list each package's files, so the browser check can't read it offline. Run uvx wheelgap ${path} in a checkout instead.`;
-  $("alerts").replaceChildren();
+  $("alerts").replaceChildren(...(state.fileNotice ? [el("p", { class: "alert warn", text: `${state.fileNotice} Checked ${path} instead.` })] : []));
   renderSetup();
   hideResultSections(true, true);
 }
@@ -423,7 +424,7 @@ function renderNext() {
   const r = state.result;
   $("cli").textContent = cliCommand(r, state.pythons, state.platforms);
   // The link names the lockfile only when a visit with the repo alone would start from another one.
-  $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, pickLockfile(state.plan.lockfiles, null)?.path ?? null);
+  $("badge-md").textContent = badgeMarkdown(state.repo, r.lockfile, pickLockfile(state.plan.lockfiles.filter((l) => !l.added), null)?.path ?? null);
   const caveats = [
     "A wheel on PyPI means pip and uv install it without compiling; it doesn't test that the package works there.",
     r.looked_up

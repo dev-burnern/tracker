@@ -82,10 +82,15 @@ test("pickRequestedFile checks a named file, adds a readable one from the tree, 
   assert.deepEqual(pickRequestedFile(locks, null, false, null), { lock: locks[0], lockfiles: locks, auto: true, notice: null });
   assert.deepEqual(pickRequestedFile(locks, "uv.lock", true, null), { lock: locks[1], lockfiles: locks, auto: false, notice: null });
   const added = pickRequestedFile(locks, "requirements/default.txt", true, null);
-  assert.deepEqual(added.lock, { path: "requirements/default.txt", offline: false });
+  assert.deepEqual(added.lock, { path: "requirements/default.txt", offline: false, added: true });
   assert.deepEqual(added.lockfiles.map((l) => l.path), ["pyproject.toml", "uv.lock", "requirements/default.txt"]);
   assert.equal(added.auto, false);
-  assert.deepEqual(pickRequestedFile(locks, "tests/poetry.lock", true, null).lock, { path: "tests/poetry.lock", offline: true });
+  assert.deepEqual(pickRequestedFile(locks, "tests/poetry.lock", true, null).lock, { path: "tests/poetry.lock", offline: true, added: true });
+  // The only checkable file being one the link named: the badge's default must still come from the repo's own list.
+  const only = pickRequestedFile([], "requirements/base.txt", true, null);
+  assert.equal(only.lock.path, "requirements/base.txt");
+  assert.equal(pickLockfile(only.lockfiles.filter((l) => !l.added), null), null);
+  assert.equal(isReadableFile("REQS.TXT"), false);
   const missing = pickRequestedFile(locks, "requirements/gone.txt", false, null);
   assert.equal(missing.lock, locks[0]);
   assert.equal(missing.auto, true);
@@ -162,6 +167,9 @@ test("a result's query round-trips, and unknown values are dropped", () => {
   });
   const odd = fromQuery("?repo=o/r&lock=../x&py=3.14,2.7,evil&t=linux-x86_64,amiga");
   assert.equal(odd.lockfile, null);
+  for (const bad of ["/x/requirements.txt", "a//b.txt", "./uv.lock", "a/./uv.lock"]) {
+    assert.equal(fromQuery(`?repo=o/r&lock=${encodeURIComponent(bad)}`).lockfile, null, bad);
+  }
   assert.deepEqual(odd.pythons, ["3.14"]);
   assert.deepEqual(odd.platforms, ["linux-x86_64"]);
   assert.equal(fromQuery("?repo=nope"), null);

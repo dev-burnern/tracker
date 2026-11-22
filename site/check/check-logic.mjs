@@ -104,14 +104,14 @@ const OFFLINE_NAMES = ["uv.lock", "pylock.toml", "poetry.lock", "pdm.lock"];
 // a lockfile (also in a folder plan() skips, or past its limit), a requirements file (*.txt, *.in) or pyproject.toml.
 export function isReadableFile(path) {
   const base = String(path ?? "").split("/").pop();
-  return LOCK_NAMES.includes(base) || base === "pyproject.toml" || /\.(txt|in)$/i.test(base)
+  return LOCK_NAMES.includes(base) || base === "pyproject.toml" || /\.(txt|in)$/.test(base)
     || (base.startsWith("pylock.") && base.endsWith(".toml")) || base.endsWith(".py.lock")
     || (base.startsWith("requirements") && base.endsWith(".lock")) || (base.endsWith(".lock") && base.includes("uv"));
 }
 
 // Pick the file to check when a link or query may have named one explicitly.
-// Returns { lock, lockfiles, auto, notice }. `lockfiles` has the named file added at the end (so the repo's own
-// automatic pick stays first) when it exists in the repo tree and is readable. `notice` says why a named file
+// Returns { lock, lockfiles, auto, notice }. `lockfiles` has the named file added at the end, marked `added` (so the
+// repo's own automatic pick stays first, and the badge never treats it as the default) when it exists in the repo tree and is readable. `notice` says why a named file
 // wasn't checked; the page adds which file it checked instead, since that can still change (withoutUnreadable).
 export function pickRequestedFile(lockfiles, requested, inTree, dir) {
   if (!requested) {
@@ -122,7 +122,7 @@ export function pickRequestedFile(lockfiles, requested, inTree, dir) {
     return { lock: existing, lockfiles, auto: false, notice: null };
   }
   if (inTree && isReadableFile(requested)) {
-    const added = { path: requested, offline: OFFLINE_NAMES.includes(requested.split("/").pop()) };
+    const added = { path: requested, offline: OFFLINE_NAMES.includes(requested.split("/").pop()), added: true };
     return { lock: added, lockfiles: [...lockfiles, added], auto: false, notice: null };
   }
   const notice = !isReadableFile(requested)
@@ -211,7 +211,7 @@ export function fromQuery(search) {
   const lock = q.get("lock");
   return {
     repo,
-    lockfile: lock && !lock.split("/").includes("..") && lock.length < 300 ? lock : null,
+    lockfile: lock && lock.split("/").every((p) => p && p !== "." && p !== "..") && lock.length < 300 ? lock : null,
     pythons: list("py", (v) => PYTHONS.includes(v) || /^3\.(1[0-9])t?$/.test(v)),
     platforms: list("t", (v) => known.has(v)),
   };
