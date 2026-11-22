@@ -489,3 +489,32 @@ test("weekSummary leaves out gains that only undo a recent loss, as the new/ pag
   ];
   assert.equal(logic.weekSummary(twice, { schema: 1, drops: [] }, "2026-11-21").gainedPackages, 1);
 });
+
+test("weekSummary's undo window has new/'s edges: a loss 0 to 7 days before a gain cancels it, 8 or a day after doesn't", () => {
+  // As filter_undo_gains in scripts/build_new_wheels.py: 0 <= (gain date - loss date).days <= 7.
+  const gainOn = "2026-11-20";
+  const counted = (lossDate) => logic.weekSummary(
+    [
+      { date: lossDate, gained: [], lost: [{ name: "x", version: "1", target: "3.14 linux-x86_64" }] },
+      { date: gainOn, gained: [{ name: "x", version: "1", target: "3.14 linux-x86_64" }], lost: [] },
+    ],
+    { schema: 1, drops: [] },
+    "2026-11-21",
+  ).gainedPackages;
+  assert.equal(counted("2026-11-13"), 0, "7 days before: the gain only undoes the loss");
+  assert.equal(counted("2026-11-12"), 1, "8 days before: a real gain");
+  assert.equal(counted("2026-11-20"), 0, "the same night: cancelled, as 0 days is in the window");
+  assert.equal(counted("2026-11-21"), 1, "a day after the gain: a later loss never cancels an earlier gain");
+  // The window crosses a month end by days, not by the day of the month.
+  const across = logic.weekSummary(
+    [
+      { date: "2026-11-24", gained: [], lost: [{ name: "y", version: "2", target: "3.14 win-arm64" }] },
+      { date: "2026-12-01", gained: [{ name: "y", version: "2", target: "3.14 win-arm64" }], lost: [] },
+      { date: "2026-11-23", gained: [], lost: [{ name: "z", version: "2", target: "3.14 win-arm64" }] },
+      { date: "2026-12-01", gained: [{ name: "z", version: "2", target: "3.14 win-arm64" }], lost: [] },
+    ],
+    { schema: 1, drops: [] },
+    "2026-12-01",
+  );
+  assert.deepEqual([across.gainedPackages, across.topGained], [1, ["z"]]);
+});
