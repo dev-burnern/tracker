@@ -199,6 +199,11 @@ function renderWeekSummary(changes, drops) {
     return;
   }
   const today = typeof state.data?.generated === "string" ? state.data.generated.slice(0, 10) : "";
+  // Without the scan's date there's no window to count in, so leave the line out rather than claim no changes.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) {
+    el.hidden = true;
+    return;
+  }
   const s = weekSummary(changes, drops, today, state.data?.packages);
   el.hidden = false;
   el.textContent = "";
@@ -213,7 +218,8 @@ function renderWeekSummary(changes, drops) {
     newLink.href = "new/";
     newLink.textContent = "gained a wheel";
     parts.push(newLink);
-    if (s.topGained.length) {
+    // "among them" only when the names are some of the packages, not all of them.
+    if (s.topGained.length && s.gainedPackages > s.topGained.length) {
       const names = s.topGained.length === 1
         ? s.topGained[0]
         : `${s.topGained.slice(0, -1).join(", ")} and ${s.topGained[s.topGained.length - 1]}`;
