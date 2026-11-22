@@ -358,3 +358,20 @@ test("the package fallback goes under the error when the lone root pyproject.tom
   assert.deepEqual(run({ lockfiles: [{ path: "pyproject.toml" }, { path: "docs/requirements.txt" }] }), [["runCheck"]]);
   assert.deepEqual(run({ lockfile: "requirements.txt" }).map(([c]) => c), ["status"]);
 });
+
+test("with no lockfile, the package command uses this repo's targets, never the last repo's", () => {
+  const source = read("check.mjs");
+  const fn = source.match(/^function onLoaded\(.*?^}$/ms);
+  assert.ok(fn, "onLoaded is in check.mjs");
+  const seen = [];
+  const state = { repo: { owner: "httpie", name: "cli", dir: null }, query: null, pythons: ["3.12"], platforms: ["macos-x86_64"] };
+  const onLoaded = new Function(
+    "state", "pickLockfile", "sortPythons", "NAMES", "status", "$", "noLockfile", "runCheck", `${fn[0]}; return onLoaded;`,
+  )(
+    state, checkLogic.pickLockfile, checkLogic.sortPythons, Object.fromEntries(checkLogic.PLATFORMS), () => {},
+    () => ({ disabled: false }), () => seen.push([state.pythons, state.platforms]), () => seen.push("runCheck"),
+  );
+  onLoaded({ plan: { lockfiles: [] }, detected: { pythons: ["3.14"], platforms: ["linux-x86_64", "win-arm64"] }, projectName: "httpie" });
+  assert.deepEqual(seen, [[["3.14"], ["linux-x86_64", "win-arm64"]]]);
+});
+

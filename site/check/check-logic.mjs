@@ -261,7 +261,10 @@ export function projectNameFromMetadata(filename, text) {
   let section = null;
   if (filename === "setup.cfg") {
     let key = false; // a key seen in this section: an indented line after it continues its value (configparser)
-    for (const raw of text.split(/\r?\n/)) {
+    const lines = text.split(/\r?\n/);
+    const indent = (raw) => raw.match(/^\s*/)[0].length;
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
       const line = raw.trim();
       if (!line || line.startsWith("#") || line.startsWith(";")) continue;
       if (key && /^\s/.test(raw)) continue;
@@ -278,6 +281,10 @@ export function projectNameFromMetadata(filename, text) {
         if (m) {
           const val = m[1].trim();
           if (/^(?:attr|file)\s*:/i.test(val)) return null;
+          // The next line that isn't blank or a comment, indented deeper than the key, continues the value
+          // ("httpie\nevil" to configparser, blank lines in between or not): not a plain name.
+          const next = lines.slice(i + 1).find((l) => l.trim() && !/^\s*[#;]/.test(l));
+          if (next !== undefined && indent(next) > indent(raw)) return null;
           return PACKAGE_NAME.test(val) ? val : null;
         }
       }
@@ -288,6 +295,8 @@ export function projectNameFromMetadata(filename, text) {
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.trim();
       if (!line || line.startsWith("#")) continue;
+      // A multi-line string isn't tracked, so a "name = ..." inside one could be read as a key: fail closed.
+      if (line.includes('"""') || line.includes("'''")) return null;
       // [table] or [[array.of.tables]], with spaces inside the brackets and a comment after, as TOML allows.
       const hdr = line.match(/^\[(\[?)\s*([^\[\]]*?)\s*\](\]?)\s*(?:#.*)?$/);
       if (hdr) {

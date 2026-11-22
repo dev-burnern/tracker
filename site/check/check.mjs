@@ -146,15 +146,16 @@ function onLoaded({ plan, detected, truncated, ref, root, projectName = null }) 
   const named = q?.lockfile && plan.lockfiles.find((l) => l.path === q.lockfile);
   const lock = named || pickLockfile(plan.lockfiles, state.repo.dir);
   state.auto = !named; // the page's own pick, not one a link or the visitor named
+  // Set before the no-lockfile answer too: its `uvx wheelgap --deps` command uses them, never the last repo's.
+  state.pythons = sortPythons(q?.pythons?.length ? q.pythons : detected.pythons);
+  state.platforms = q?.platforms?.length ? q.platforms : detected.platforms.filter((p) => NAMES[p]);
+  if (!state.platforms.length) state.platforms = ["linux-x86_64"];
   if (!lock) {
     status("");
     $("go").disabled = false;
     return noLockfile();
   }
   state.lockfile = lock.path;
-  state.pythons = sortPythons(q?.pythons?.length ? q.pythons : detected.pythons);
-  state.platforms = q?.platforms?.length ? q.platforms : detected.platforms.filter((p) => NAMES[p]);
-  if (!state.platforms.length) state.platforms = ["linux-x86_64"];
   state.query = null;
   runCheck();
 }

@@ -229,6 +229,19 @@ test("projectNameFromMetadata reads a setup.cfg as configparser does and a pypro
   assert.equal(toml('["project"]\nname = "unsure"\n'), null);
 });
 
+test("projectNameFromMetadata refuses a value configparser continues and a multi-line TOML string", () => {
+  const cfg = (text) => projectNameFromMetadata("setup.cfg", text);
+  // configparser reads "httpie\nevil": an indented line after the key continues it, blank lines in between or not.
+  assert.equal(cfg("[metadata]\nname = httpie\n  evil\n"), null);
+  assert.equal(cfg("[metadata]\nname = httpie\n\n  more\n"), null);
+  assert.equal(cfg("[metadata]\nname = httpie\n# c\nversion = 1\n"), "httpie");
+  const toml = (text) => projectNameFromMetadata("pyproject.toml", text);
+  // A "name = ..." inside a multi-line string isn't a key, and the reader doesn't track strings: it refuses.
+  assert.equal(toml('[project]\ndescription = """\nname = "evil"\n"""\nname = "real"\n'), null);
+  assert.equal(toml("[project]\ndescription = '''\nname = \"evil\"\n'''\nname = \"real\"\n"), null);
+  assert.equal(toml('[project]\nname = "real"\ndescription = """x"""\n'), "real");
+});
+
 test("the project name is read from a lone root pyproject.toml, then a root setup.cfg, and only then", () => {
   const pyproject = [{ path: "pyproject.toml", offline: false }];
   assert.deepEqual(metadataFiles([], ["setup.cfg", "setup.py"]), ["setup.cfg"]);
